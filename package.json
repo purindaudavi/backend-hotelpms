@@ -15,10 +15,15 @@
   "type": "commonjs",
   "main": "server.js",
   "scripts": {
-    "test": "npm run dev"
+    "test": "nodemon run dev",
+    "start": "node server.js",
+    "dev": "nodemon run dev",
+    "serve": "node server.js"
   },
   "dependencies": {
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "mongodb": "^7.5.0",
     "mongoose": "^9.7.4",
     "nodemon": "^3.1.14"
