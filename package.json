@@ -1,0 +1,26 @@
+{
+  "name": "hotelbackend",
+  "version": "1.0.0",
+  "description": "hotelbackend",
+  "homepage": "https://github.com/purindaudavi/backend-hotelpms#readme",
+  "bugs": {
+    "url": "https://github.com/purindaudavi/backend-hotelpms/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/purindaudavi/backend-hotelpms.git"
+  },
+  "license": "Apache-2.0",
+  "author": "",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "test": "npm run dev"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "mongodb": "^7.5.0",
+    "mongoose": "^9.7.4",
+    "nodemon": "^3.1.14"
+  }
+}
