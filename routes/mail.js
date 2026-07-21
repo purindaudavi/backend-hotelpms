@@ -411,12 +411,25 @@ router.post("/mail/check-out", async (req, res) => {
 
 
 router.post("/mail/cancellation", async (req, res) => {
-     const { mail, name, reservation ,originalcheckin , originalcheckout , rooms ,boookingsource ,
-          payment, } = req.body;
+     const {
+        mail,
+        name,
+        reservation,
+        originalcheckin,
+        originalcheckout,
+        rooms,
+        bookingsource,
+        boookingsource,
+        payment
+     } = req.body;
 
-    if (!mail || !name || !reservation || !originalcheckin || !originalcheckout || !rooms || !boookingsource ||  !payment ) {
+    const bookingSource = bookingsource || boookingsource || "Direct";
+    const roomDetails = rooms || "Not assigned";
+    const paymentDetails = payment || "Not specified";
+
+    if (!mail || !name || !reservation || !originalcheckin || !originalcheckout) {
         return res.status(400).json({
-            message: "mail, name ,reservation ,originalcheckin ,originalcheckout ,rooms ,boookingsource l ,payment are required"
+            message: "mail, name, reservation, originalcheckin and originalcheckout are required"
         });
     }
     try {
@@ -425,7 +438,7 @@ router.post("/mail/cancellation", async (req, res) => {
             to: mail,
             subject: "Cancellation Information",
             text: `Dear ${name}, reservation ${reservation} has been cancelled. Check-in: ${originalcheckin}, Check-out: ${originalcheckout}, 
-            Rooms: ${rooms}, Booking Source: ${boookingsource},  Payment Method: ${payment}.`
+            Rooms: ${roomDetails}, Booking Source: ${bookingSource}, Payment Method: ${paymentDetails}.`
         });
 
         return res.status(200).json({
@@ -579,19 +592,31 @@ router.post("/mail/no-show", async (req, res) => {
 
 
 router.post("/mail/general", async (req, res) => {
-     const { mail, name, } = req.body;
+     const { mail, name, subject = "General Information", message = "This is a general notification." } = req.body;
 
-    if (!mail || !name  ) {
+    if (!mail || !name || !subject || !message) {
         return res.status(400).json({
-            message: "mail and name are required"
+            message: "mail, name, subject and message are required"
         });
     }
+
+    const html = createEmailTemplate({
+        title: subject,
+        name,
+        message,
+        color: "#6d28d9",
+        details: [],
+        contactTitle: "Kind regards",
+        contactMessage: "Ronaka Airport Transit Hotel - +94 70 355 1340"
+    });
+
     try {
         await transporter.sendMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "General Information",
-            text: `Dear ${name}, this is a general notification.`
+            subject,
+            text: `Dear ${name}, ${message}`,
+            html
         });
 
         return res.status(200).json({
@@ -611,4 +636,3 @@ router.post("/mail/general", async (req, res) => {
     
 });
 module.exports = router;
-
