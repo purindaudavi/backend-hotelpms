@@ -77,6 +77,37 @@ const transporter = nodemailer.createTransport({
     }
 });
 
+function createDeliveryReport(info) {
+    const accepted = (info.accepted || []).map(String);
+    const rejected = (info.rejected || []).map(String);
+    const pending = (info.pending || []).map(String);
+    const status = rejected.length && !accepted.length
+        ? "rejected"
+        : pending.length
+            ? "queued"
+            : "accepted";
+
+    return {
+        status,
+        messageId: info.messageId || "",
+        response: info.response || "",
+        accepted,
+        rejected,
+        pending
+    };
+}
+
+async function sendHotelMail(options) {
+    const info = await transporter.sendMail(options);
+    const delivery = createDeliveryReport(info);
+    console.info("SMTP delivery handoff", {
+        to: options.to,
+        subject: options.subject,
+        ...delivery
+    });
+    return delivery;
+}
+
 const emailSubjects = {
     confirmation: "Booking Confirmation",
     "check-in": "Hotel Check-in",
@@ -304,19 +335,21 @@ router.post("/mail/confirmation", async (req, res) => {
 
         contactTitle: "Sign-off",
         contactMessage:
-            "We look forward to welcoming you! <br></br> If you have any questions, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
+            "We look forward to welcoming you! If you have any questions, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
     });
 
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: "Booking Confirmation",
-            text: `Dear ${name}, booking  ${checkin}. check-in and ${checkout} check-out for ${duration} days, ${rooms} rooms, payment method: ${payment}, total amount: ${total}, special requests: ${sperequest}.`
+            text: `Dear ${name}, booking ${checkin}. Check-in: ${checkin}, check-out: ${checkout}, duration: ${duration}, rooms: ${rooms}, payment: ${payment}, total: LKR ${total}, special requests: ${sperequest}.`,
+            html
         });
 
         return res.status(200).json({
-            message: "confirmation email sent successfully"
+            message: "confirmation email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error); 
@@ -344,17 +377,40 @@ router.post("/mail/check-in", async (req, res) => {
             message: "mail, name ,reservation ,checkin and checkout ,nights ,rooms ,sperequest and timelocation are required"
         });
     }
+
+    const html = createEmailTemplate({
+        title: "WELCOME - CHECK-IN",
+        name,
+        message: `Your reservation ${reservation} is ready for check-in.`,
+        color: "#0f766e",
+        details: [
+            { label: "Reservation", value: reservation },
+            { label: "Check-in", value: checkin },
+            { label: "Check-out", value: checkout },
+            { label: "Nights", value: nights },
+            { label: "Rooms", value: rooms },
+            { label: "Time and location", value: timelocation },
+            ...(wifiname ? [{ label: "Wi-Fi network", value: wifiname }] : []),
+            ...(wifipwd ? [{ label: "Wi-Fi password", value: wifipwd }] : []),
+            { label: "Special requests", value: sperequest }
+        ],
+        contactTitle: "Welcome to Ronaka Airport Transit Hotel",
+        contactMessage: "If you need assistance during your stay, contact our hotel at +94 70 355 1340."
+    });
+
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: "Check-in Information",
             text: `Dear ${name}, reservation ${reservation} has been confirmed. Check-in: ${checkin}, Check-out: ${checkout}, 
-            Nights: ${nights}, Rooms: ${rooms}, Special Requests: ${sperequest}, Time and Location: ${timelocation}.`
+            Nights: ${nights}, Rooms: ${rooms}, Special Requests: ${sperequest}, Time and Location: ${timelocation}.`,
+            html
         });
 
         return res.status(200).json({
-            message: "check-in email sent successfully"
+            message: "check-in email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
@@ -382,17 +438,37 @@ router.post("/mail/check-out", async (req, res) => {
             message: "mail, name ,reservation ,checkin and checkout ,duration ,finaltotal ,payment are required"
         });
     }
+
+    const html = createEmailTemplate({
+        title: "THANK YOU FOR STAYING WITH US",
+        name,
+        message: `Check-out details for reservation ${reservation}.`,
+        color: "#2563eb",
+        details: [
+            { label: "Reservation", value: reservation },
+            { label: "Check-in", value: checkin },
+            { label: "Check-out", value: checkout },
+            { label: "Duration", value: duration },
+            { label: "Final total", value: `LKR ${finaltotal}` },
+            { label: "Payment", value: payment }
+        ],
+        contactTitle: "We hope to welcome you again",
+        contactMessage: "If you have questions about your final bill, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
+    });
+
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: "Check-out Information",
             text: `Dear ${name}, reservation ${reservation} has been confirmed. Check-in: ${checkin}, Check-out: ${checkout}, 
-            Duration: ${duration}, Final Total: ${finaltotal}, Payment Method: ${payment}.`
+            Duration: ${duration}, Final Total: ${finaltotal}, Payment Method: ${payment}.`,
+            html
         });
 
         return res.status(200).json({
-            message: "check-out email sent successfully"
+            message: "check-out email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
@@ -432,17 +508,37 @@ router.post("/mail/cancellation", async (req, res) => {
             message: "mail, name, reservation, originalcheckin and originalcheckout are required"
         });
     }
+
+    const html = createEmailTemplate({
+        title: "BOOKING CANCELLED",
+        name,
+        message: `Reservation ${reservation} has been cancelled.`,
+        color: "#b91c1c",
+        details: [
+            { label: "Reservation", value: reservation },
+            { label: "Original check-in", value: originalcheckin },
+            { label: "Original check-out", value: originalcheckout },
+            { label: "Rooms", value: roomDetails },
+            { label: "Booking source", value: bookingSource },
+            { label: "Payment", value: paymentDetails }
+        ],
+        contactTitle: "Need help with this cancellation?",
+        contactMessage: "Contact Ronaka Airport Transit Hotel at +94 70 355 1340 if you have any questions."
+    });
+
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: "Cancellation Information",
             text: `Dear ${name}, reservation ${reservation} has been cancelled. Check-in: ${originalcheckin}, Check-out: ${originalcheckout}, 
-            Rooms: ${roomDetails}, Booking Source: ${bookingSource}, Payment Method: ${paymentDetails}.`
+            Rooms: ${roomDetails}, Booking Source: ${bookingSource}, Payment Method: ${paymentDetails}.`,
+            html
         });
 
         return res.status(200).json({
-            message: "cancellation email sent successfully"
+            message: "cancellation email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
@@ -470,17 +566,38 @@ router.post("/mail/remind", async (req, res) => {
             message: "mail, name ,reservation ,checkin ,checkout ,nights ,rooms ,balance ,special request are required"
         });
     }
+
+    const html = createEmailTemplate({
+        title: "UPCOMING STAY REMINDER",
+        name,
+        message: `This is a friendly reminder about reservation ${reservation}.`,
+        color: "#b45309",
+        details: [
+            { label: "Reservation", value: reservation },
+            { label: "Check-in", value: checkin },
+            { label: "Check-out", value: checkout },
+            { label: "Nights", value: nights },
+            { label: "Rooms", value: rooms },
+            { label: "Balance / payment", value: balance },
+            { label: "Special requests", value: spereq }
+        ],
+        contactTitle: "We look forward to welcoming you",
+        contactMessage: "For changes or questions, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
+    });
+
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: "Reminder Information",
             text: `Dear ${name}, this is a reminder about your reservation ${reservation}. Check-in: ${checkin}, Check-out: ${checkout}, 
-            Nights: ${nights}, Rooms: ${rooms}, Balance: ${balance}, Special Request: ${spereq}.`
+            Nights: ${nights}, Rooms: ${rooms}, Balance: ${balance}, Special Request: ${spereq}.`,
+            html
         });
 
         return res.status(200).json({
-            message: "reminder email sent successfully"
+            message: "reminder email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
@@ -565,7 +682,7 @@ router.post("/mail/no-show", async (req, res) => {
     });
 
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject: `No-show Notice - ${reservation}`,
@@ -576,7 +693,8 @@ router.post("/mail/no-show", async (req, res) => {
 
 
         return res.status(200).json({
-            message: "No-show email sent successfully"
+            message: "No-show email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
@@ -611,7 +729,7 @@ router.post("/mail/general", async (req, res) => {
     });
 
     try {
-        await transporter.sendMail({
+        const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
             subject,
@@ -620,7 +738,8 @@ router.post("/mail/general", async (req, res) => {
         });
 
         return res.status(200).json({
-            message: "general email sent successfully"
+            message: "general email accepted by SMTP server",
+            delivery
         });
     } catch (error) {
         console.error(error);
