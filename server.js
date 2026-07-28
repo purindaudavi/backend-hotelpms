@@ -6,6 +6,7 @@ const mongoose = require("mongoose");
 const { connectDatabase, disconnectDatabase } = require("./config/database");
 const mailRoutes = require("./routes/mail");
 const roomRoutes = require("./routes/rooms");
+const guestRoutes = require("./routes/guest");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -28,6 +29,7 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api", mailRoutes);
 app.use("/api/rooms", roomRoutes);
+app.use("/api/guests", guestRoutes);
 
 async function startServer() {
   await connectDatabase();

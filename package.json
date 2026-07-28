@@ -19,7 +19,7 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "serve": "node server.js",
-    "check": "node --check server.js && node --check routes/rooms.js && node --check db_models/rooms.model.js"
+    "check": "node --check server.js && node --check routes/rooms.js && node --check db_models/rooms.model.js && node --check routes/guest.js && node --check db_models/guest.model.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
