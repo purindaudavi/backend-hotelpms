@@ -7,6 +7,7 @@ const { connectDatabase, disconnectDatabase } = require("./config/database");
 const mailRoutes = require("./routes/mail");
 const roomRoutes = require("./routes/rooms");
 const guestRoutes = require("./routes/guest");
+const bookingRoutes = require("./routes/bookings");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -30,6 +31,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api", mailRoutes);
 app.use("/api/rooms", roomRoutes);
 app.use("/api/guests", guestRoutes);
+app.use("/api/bookings", bookingRoutes);
 
 async function startServer() {
   await connectDatabase();
