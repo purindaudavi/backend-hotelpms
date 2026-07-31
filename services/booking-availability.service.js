@@ -5,6 +5,7 @@ const {
 } = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
+const CrossBooking = require("../db_models/crossbooking.model");
 
 async function validateReservationInventory({
   propertyId,
@@ -28,6 +29,7 @@ async function validateReservationInventory({
 
   const roomTypeMap = new Map(roomTypes.map((roomType) => [String(roomType._id), roomType]));
   const requestedByType = new Map();
+  const assignedPhysicalRooms = new Map();
 
   for (const room of rooms) {
     const roomType = roomTypeMap.get(String(room.room_type_id));
@@ -60,6 +62,10 @@ async function validateReservationInventory({
       throw conflict(`The selected physical room for ${roomType.name} is unavailable.`);
     }
     room.room_number = physicalRoom.room_number;
+    assignedPhysicalRooms.set(
+      String(physicalRoom._id),
+      physicalRoom.room_number
+    );
 
     const overlapQuery = overlapReservationQuery({
       propertyId,
@@ -76,6 +82,15 @@ async function validateReservationInventory({
       );
     }
   }
+
+  await validateCrossBookingConflicts({
+    propertyId,
+    checkIn,
+    checkOut,
+    assignedPhysicalRooms,
+    excludeReservationId,
+    session
+  });
 
   const overlappingReservations = await Reservation.find(
     overlapReservationQuery({
@@ -150,6 +165,95 @@ async function validateReservationInventory({
       );
     }
   }
+}
+
+async function validateCrossBookingConflicts({
+  propertyId,
+  checkIn,
+  checkOut,
+  assignedPhysicalRooms,
+  excludeReservationId,
+  session
+}) {
+  const assignedIds = [...assignedPhysicalRooms.keys()];
+  if (!assignedIds.length) return;
+
+  const objectIds = assignedIds.map((id) => new mongoose.Types.ObjectId(id));
+  const links = await CrossBooking.find({
+    property_id: propertyId,
+    active: true,
+    $or: [
+      { room_a_id: { $in: objectIds } },
+      { room_b_id: { $in: objectIds } }
+    ]
+  }).session(session || null);
+  if (!links.length) return;
+
+  const assignedSet = new Set(assignedIds);
+  for (const link of links) {
+    const roomAId = String(link.room_a_id);
+    const roomBId = String(link.room_b_id);
+    if (assignedSet.has(roomAId) && assignedSet.has(roomBId)) {
+      throw conflict(
+        `Rooms ${link.room_a_number} and ${link.room_b_number} are cross-booked and cannot be assigned together.`
+      );
+    }
+  }
+
+  const linkedIds = new Set();
+  links.forEach((link) => {
+    const roomAId = String(link.room_a_id);
+    const roomBId = String(link.room_b_id);
+    if (assignedSet.has(roomAId)) linkedIds.add(roomBId);
+    if (assignedSet.has(roomBId)) linkedIds.add(roomAId);
+  });
+  if (!linkedIds.size) return;
+
+  const overlapQuery = overlapReservationQuery({
+    propertyId,
+    checkIn,
+    checkOut,
+    excludeReservationId
+  });
+  overlapQuery.rooms = {
+    $elemMatch: {
+      physical_room_id: {
+        $in: [...linkedIds].map((id) => new mongoose.Types.ObjectId(id))
+      }
+    }
+  };
+  const conflictingReservation = await Reservation.findOne(
+    overlapQuery,
+    { reservation_no: 1, rooms: 1 }
+  ).session(session || null);
+  if (!conflictingReservation) return;
+
+  const conflictingRoom = conflictingReservation.rooms.find((room) =>
+    linkedIds.has(String(room.physical_room_id || ""))
+  );
+  const conflictingRoomId = String(conflictingRoom?.physical_room_id || "");
+  const link = links.find((candidate) => {
+    const roomAId = String(candidate.room_a_id);
+    const roomBId = String(candidate.room_b_id);
+    return (
+      (assignedSet.has(roomAId) && roomBId === conflictingRoomId) ||
+      (assignedSet.has(roomBId) && roomAId === conflictingRoomId)
+    );
+  });
+  const selectedRoomNumber = link
+    ? assignedSet.has(String(link.room_a_id))
+      ? link.room_a_number
+      : link.room_b_number
+    : "selected room";
+  const linkedRoomNumber = conflictingRoom?.room_number ||
+    (link && conflictingRoomId === String(link.room_a_id)
+      ? link.room_a_number
+      : link?.room_b_number) ||
+    "linked room";
+
+  throw conflict(
+    `Physical room ${selectedRoomNumber} is unavailable because cross-booked room ${linkedRoomNumber} is assigned to reservation ${conflictingReservation.reservation_no}.`
+  );
 }
 
 async function validateBusinessBlockInventory({
