@@ -10,6 +10,7 @@ const guestRoutes = require("./routes/guest");
 const bookingRoutes = require("./routes/bookings");
 const createEventRoutes = require("./routes/create-event");
 const crossBookingRoutes = require("./routes/crossbooking");
+const reportRoutes = require("./routes/reports");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -36,6 +37,7 @@ app.use("/api/guests", guestRoutes);
 app.use("/api/bookings", bookingRoutes);
 app.use("/api/events", createEventRoutes);
 app.use("/api/cross-bookings", crossBookingRoutes);
+app.use("/api/reports", reportRoutes);
 
 async function startServer() {
   await connectDatabase();
