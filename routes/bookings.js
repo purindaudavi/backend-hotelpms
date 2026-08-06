@@ -1375,7 +1375,7 @@ async function synchronizeGuestProfile(reservation, session) {
         email
       }
     },
-    { new: true, upsert: true, runValidators: true, session }
+    { returnDocument: "after", upsert: true, runValidators: true, session }
   );
   reservation.booker.guest_profile_id = guest._id;
 }

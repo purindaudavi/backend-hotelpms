@@ -12,6 +12,8 @@ const createEventRoutes = require("./routes/create-event");
 const crossBookingRoutes = require("./routes/crossbooking");
 const reportRoutes = require("./routes/reports");
 const rateRoutes = require("./routes/rates");
+const invoiceRoutes = require("./routes/invoices");
+const creditRoutes = require("./routes/credits");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -40,6 +42,8 @@ app.use("/api/events", createEventRoutes);
 app.use("/api/cross-bookings", crossBookingRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/rates", rateRoutes);
+app.use("/api/invoices", invoiceRoutes);
+app.use("/api/credits", creditRoutes);
 
 async function startServer() {
   await connectDatabase();

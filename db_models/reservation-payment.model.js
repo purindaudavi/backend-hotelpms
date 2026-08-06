@@ -16,6 +16,13 @@ const ReservationPaymentSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    invoice_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Invoice",
+      required: false,
+      index: true
+    },
+    invoice_no: { type: String, trim: true, uppercase: true, maxlength: 50, default: "" },
     amount: { type: Number, required: true, min: 0.01 },
     currency: {
       type: String,
@@ -64,6 +71,7 @@ ReservationPaymentSchema.index({
   status: 1,
   posted_at: -1
 });
+ReservationPaymentSchema.index({ property_id: 1, invoice_id: 1, status: 1, posted_at: -1 });
 
 const ReservationPayment =
   mongoose.models.ReservationPayment ||
