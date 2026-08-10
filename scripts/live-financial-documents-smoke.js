@@ -8,6 +8,7 @@ const Reservation = require("../db_models/booking.model");
 const Guest = require("../db_models/guest.model");
 const Invoice = require("../db_models/invoice.model");
 const CreditNote = require("../db_models/credit-note.model");
+const Refund = require("../db_models/refund.model");
 const DocumentCounter = require("../db_models/document-counter.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const BookingAuditLog = require("../db_models/booking-log.model");
@@ -55,13 +56,13 @@ async function run() {
       method: "POST",
       headers,
       body: JSON.stringify({
-        amount: 3000,
+        amount: 13000,
         payment_method: "cash",
         payment_reference: `SMOKE-${suffix}`
       })
     }, 201);
-    assert.equal(postedPayment.invoice.status, "partially_paid");
-    assert.equal(postedPayment.invoice.balance_due, 10000);
+    assert.equal(postedPayment.invoice.status, "paid");
+    assert.equal(postedPayment.invoice.balance_due, 0);
 
     const createdCredit = await requestJson(`${baseUrl}/api/credits`, {
       method: "POST",
@@ -88,7 +89,33 @@ async function run() {
       200
     );
     assert.equal(issuedCredit.invoice.credited_amount, 1000);
-    assert.equal(issuedCredit.invoice.balance_due, 9000);
+    assert.equal(issuedCredit.invoice.balance_due, 0);
+    assert.equal(issuedCredit.invoice.refund_due, 1000);
+
+    const createdRefund = await requestJson(`${baseUrl}/api/refunds`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        invoice_id: invoiceId,
+        payment_id: postedPayment.payment._id,
+        amount: 1000,
+        refund_method: "cash",
+        reference_number: `REFUND-${suffix}`,
+        reason: "Returning the credit-note overpayment."
+      })
+    }, 201);
+    assert.match(createdRefund.refund.refund_no, /^RF-\d{4}-\d{6}$/);
+    assert.equal(createdRefund.refund.status, "pending");
+
+    const completedRefund = await requestJson(
+      `${baseUrl}/api/refunds/${createdRefund.refund._id}/complete`,
+      { method: "POST", headers, body: "{}" },
+      200
+    );
+    assert.equal(completedRefund.refund.status, "completed");
+    assert.equal(completedRefund.invoice.paid_amount, 12000);
+    assert.equal(completedRefund.invoice.refund_due, 0);
+    assert.equal(completedRefund.invoice.balance_due, 0);
 
     const invoiceDetail = await requestJson(
       `${baseUrl}/api/invoices/${invoiceId}`,
@@ -97,9 +124,10 @@ async function run() {
     );
     assert.equal(invoiceDetail.payments.length, 1);
     assert.equal(invoiceDetail.credits.length, 1);
-    assert.ok(invoiceDetail.logs.length >= 4);
+    assert.equal(invoiceDetail.refunds.length, 1);
+    assert.ok(invoiceDetail.logs.length >= 6);
 
-    console.log("Live invoice and credit-note API smoke test passed.");
+    console.log("Live invoice, credit-note, and refund API smoke test passed.");
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (mongoose.connection.readyState === 1) await cleanup();
@@ -148,14 +176,17 @@ async function createFixtures() {
 async function cleanup() {
   const invoices = await Invoice.find({ property_id: propertyId }).select("_id");
   const credits = await CreditNote.find({ property_id: propertyId }).select("_id");
+  const refunds = await Refund.find({ property_id: propertyId }).select("_id");
   const entityIds = [
     ...(reservation ? [reservation._id] : []),
     ...invoices.map((item) => item._id),
-    ...credits.map((item) => item._id)
+    ...credits.map((item) => item._id),
+    ...refunds.map((item) => item._id)
   ];
   await Promise.all([
     ReservationPayment.deleteMany({ property_id: propertyId }),
     BookingAuditLog.deleteMany({ property_id: propertyId, entity_id: { $in: entityIds } }),
+    Refund.deleteMany({ property_id: propertyId }),
     CreditNote.deleteMany({ property_id: propertyId }),
     Invoice.deleteMany({ property_id: propertyId }),
     DocumentCounter.deleteMany({ property_id: propertyId }),
@@ -174,6 +205,6 @@ async function requestJson(url, options, expectedStatus) {
 }
 
 run().catch((error) => {
-  console.error(`Live invoice and credit-note API smoke test failed: ${error.message}`);
+  console.error(`Live financial documents API smoke test failed: ${error.message}`);
   process.exitCode = 1;
 });

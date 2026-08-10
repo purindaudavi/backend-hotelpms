@@ -123,3 +123,11 @@ test("calculates readable invoice payment statuses", () => {
   assert.equal(calculatedInvoiceStatus({ grand_total: 1000, paid_amount: 1000, credited_amount: 0 }), "paid");
   assert.equal(calculatedInvoiceStatus({ grand_total: 1000, paid_amount: 0, credited_amount: 1000 }), "credited");
 });
+
+test("calculates the amount due back after a credit creates an overpayment", async () => {
+  const invoice = validInvoice({ paid_amount: 15200, credited_amount: 1200 });
+  await invoice.validate();
+
+  assert.equal(invoice.balance_due, 0);
+  assert.equal(invoice.refund_due, 1200);
+});

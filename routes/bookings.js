@@ -20,6 +20,11 @@ const {
   validateBusinessBlockInventory,
   validateReservationInventory
 } = require("../services/booking-availability.service");
+const {
+  ensureInvoiceForConfirmedReservation,
+  prepareInvoicesForReservationCancellation,
+  synchronizeAutomaticDraftInvoice
+} = require("../services/invoice-automation.service");
 
 const router = express.Router();
 const attachmentBodyParser = express.raw({ type: "*/*", limit: "10mb" });
@@ -166,6 +171,11 @@ router.post("/reservations", asyncHandler(async (req, res) => {
       requestId: requestId(req),
       session
     });
+    await ensureInvoiceForConfirmedReservation({
+      reservation,
+      requestId: requestId(req),
+      session
+    });
     return reservation;
   });
 
@@ -246,6 +256,11 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
       description: `Reservation ${record.reservation_no} was updated.`,
       actor,
       changes: changesFromPayload(before, after, RESERVATION_EDIT_FIELDS),
+      requestId: requestId(req),
+      session
+    });
+    await synchronizeAutomaticDraftInvoice({
+      reservation: record,
       requestId: requestId(req),
       session
     });
@@ -382,6 +397,14 @@ router.post("/reservations/:reservationId/cancel", asyncHandler(async (req, res)
     action: "reservation_cancelled",
     description: (record) =>
       `Reservation ${record.reservation_no} was cancelled: ${reason}`,
+    beforeTransition({ reservation: record, requestId: currentRequestId, session }) {
+      return prepareInvoicesForReservationCancellation({
+        reservation: record,
+        cancellationReason: reason,
+        requestId: currentRequestId,
+        session
+      });
+    },
     mutate(record, actor) {
       record.cancelled_at = new Date();
       record.cancelled_by = actor;
@@ -1134,6 +1157,11 @@ router.post("/business-blocks/:blockId/allocations/:allocationId/reservations", 
       requestId: requestId(req),
       session
     });
+    await ensureInvoiceForConfirmedReservation({
+      reservation: record,
+      requestId: requestId(req),
+      session
+    });
     await writeAuditLog({
       propertyId,
       entityType: "business_block",
@@ -1222,6 +1250,13 @@ async function transitionReservation(req, options) {
         `A ${reservation.status} reservation cannot be changed to ${options.to}.`
       );
     }
+    const currentRequestId = requestId(req);
+    await options.beforeTransition?.({
+      reservation,
+      actor,
+      requestId: currentRequestId,
+      session
+    });
     const previousStatus = reservation.status;
     reservation.status = options.to;
     reservation.updated_by = actor;
@@ -1237,7 +1272,12 @@ async function transitionReservation(req, options) {
         `Reservation ${reservation.reservation_no} changed to ${options.to}.`,
       actor,
       changes: [{ field: "status", from: previousStatus, to: options.to }],
-      requestId: requestId(req),
+      requestId: currentRequestId,
+      session
+    });
+    await ensureInvoiceForConfirmedReservation({
+      reservation,
+      requestId: currentRequestId,
       session
     });
     return reservation;

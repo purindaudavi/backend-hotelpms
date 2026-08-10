@@ -99,6 +99,147 @@ async function main() {
     );
     results.push("reservation_confirm");
 
+    const automaticInvoices = await request(
+      `/invoices?property_id=${propertyId}&reservation_id=${reservation._id}`
+    );
+    assert.equal(automaticInvoices.total, 1);
+    assert.equal(automaticInvoices.invoices[0].status, "draft");
+    assert.equal(automaticInvoices.invoices[0].created_by.user_id, "system");
+    assert.equal(automaticInvoices.invoices[0].created_by.name, "System");
+    const automaticInvoiceDetail = await request(
+      `/invoices/${automaticInvoices.invoices[0]._id}?property_id=${propertyId}`
+    );
+    const automaticInvoiceLog = automaticInvoiceDetail.logs.find(
+      (log) => log.action === "invoice_created_automatically"
+    );
+    assert.equal(automaticInvoiceLog.actor.user_id, "system");
+    assert.equal(automaticInvoiceLog.actor.name, "System");
+    results.push("automatic_invoice_on_confirm");
+
+    await request(
+      `/invoices/${automaticInvoices.invoices[0]._id}?property_id=${propertyId}`,
+      {
+        method: "PATCH",
+        body: {
+          line_items: [
+            ...automaticInvoices.invoices[0].line_items,
+            {
+              source_type: "service",
+              service_date: "2026-07-30",
+              description: "Smoke-test welcome service",
+              quantity: 1,
+              unit_price: 500,
+              discount_amount: 0,
+              tax_rate: 0
+            }
+          ]
+        }
+      }
+    );
+    await request(
+      `/bookings/reservations/${reservation._id}?property_id=${propertyId}`,
+      {
+        method: "PATCH",
+        body: {
+          booker: {
+            ...reservation.booker,
+            name: "Updated Smoke Test Guest"
+          },
+          rooms: [{
+            room_type_id: roomType._id,
+            room_type_name: roomType.name,
+            physical_room_id: roomType.physical_rooms[0]._id,
+            adults: 2,
+            children: 0,
+            currency: "LKR",
+            original_nightly_rate: 15000,
+            effective_nightly_rate: 15000
+          }],
+          financial_summary: {
+            room_total: 15000,
+            grand_total: 15000,
+            paid_total: 0
+          }
+        }
+      }
+    );
+    const synchronizedInvoice = await request(
+      `/invoices/${automaticInvoices.invoices[0]._id}?property_id=${propertyId}`
+    );
+    assert.equal(synchronizedInvoice.invoice.billing_snapshot.name, "Updated Smoke Test Guest");
+    assert.equal(synchronizedInvoice.invoice.line_items.length, 2);
+    assert.equal(synchronizedInvoice.invoice.line_items[0].unit_price, 15000);
+    assert.equal(synchronizedInvoice.invoice.line_items[1].description, "Smoke-test welcome service");
+    assert.equal(synchronizedInvoice.invoice.grand_total, 15500);
+    const synchronizationLog = synchronizedInvoice.logs.find(
+      (log) => log.action === "invoice_synchronized_automatically"
+    );
+    assert.equal(synchronizationLog.actor.user_id, "system");
+    results.push("automatic_draft_invoice_sync");
+
+    const confirmedOnCreateResponse = await request("/bookings/reservations", {
+      method: "POST",
+      body: {
+        property_id: propertyId,
+        booking_reference: "SMOKE-WEB-002",
+        reservation_date: "2026-07-30",
+        check_in: "2026-08-01",
+        check_out: "2026-08-02",
+        status: "confirmed",
+        booking_source: "Direct",
+        booker: {
+          title: "Ms",
+          name: "Confirmed Smoke Guest",
+          phone: "+94710000001",
+          email: "confirmed-smoke-booking@example.com",
+          country: "Sri Lanka"
+        },
+        rooms: [{
+          room_type_id: roomType._id,
+          room_type_name: roomType.name,
+          physical_room_id: roomType.physical_rooms[1]._id,
+          adults: 2,
+          children: 0,
+          currency: "LKR",
+          original_nightly_rate: 14500,
+          effective_nightly_rate: 14500
+        }],
+        currency: "LKR",
+        rate_plan_name: "Standard Room Only",
+        meal_plan: "Room Only",
+        financial_summary: {
+          room_total: 14500,
+          grand_total: 14500,
+          paid_total: 0
+        }
+      }
+    });
+    const confirmedOnCreateInvoices = await request(
+      `/invoices?property_id=${propertyId}&reservation_id=${confirmedOnCreateResponse.reservation._id}`
+    );
+    assert.equal(confirmedOnCreateInvoices.total, 1);
+    assert.equal(confirmedOnCreateInvoices.invoices[0].created_by.user_id, "system");
+    results.push("automatic_invoice_on_confirmed_create");
+
+    const cancelledReservation = await request(
+      `/bookings/reservations/${confirmedOnCreateResponse.reservation._id}/cancel?property_id=${propertyId}`,
+      {
+        method: "POST",
+        body: { reason: "Smoke-test cancellation" }
+      }
+    );
+    assert.equal(cancelledReservation.reservation.status, "cancelled");
+    const voidedAutomaticInvoice = await request(
+      `/invoices/${confirmedOnCreateInvoices.invoices[0]._id}?property_id=${propertyId}`
+    );
+    assert.equal(voidedAutomaticInvoice.invoice.status, "voided");
+    assert.equal(voidedAutomaticInvoice.invoice.voided_by.user_id, "system");
+    const automaticVoidLog = voidedAutomaticInvoice.logs.find(
+      (log) => log.action === "invoice_voided_automatically"
+    );
+    assert.equal(automaticVoidLog.actor.user_id, "system");
+    results.push("automatic_draft_invoice_void_on_cancel");
+
     const paymentResponse = await request(
       `/bookings/reservations/${reservation._id}/payments?property_id=${propertyId}`,
       {
@@ -136,6 +277,11 @@ async function main() {
     assert.equal(detail.payments.length, 1);
     assert.equal(detail.attachments.length, 1);
     assert.ok(detail.logs.length >= 4);
+    const reservationInvoiceLog = detail.logs.find(
+      (log) => log.action === "reservation_invoice_created"
+    );
+    assert.equal(reservationInvoiceLog.actor.user_id, "system");
+    assert.equal(reservationInvoiceLog.actor.name, "System");
     results.push("reservation_details_and_logs");
 
     const checkedIn = await request(
@@ -214,6 +360,26 @@ async function main() {
     assert.equal(String(pickup.reservation.business_block_id), String(block._id));
     results.push("business_block_pickup");
 
+    const pickupInvoices = await request(
+      `/invoices?property_id=${propertyId}&reservation_id=${pickup.reservation._id}`
+    );
+    assert.equal(pickupInvoices.total, 1);
+    await request(
+      `/invoices/${pickupInvoices.invoices[0]._id}/issue?property_id=${propertyId}`,
+      { method: "POST", body: {} }
+    );
+    const blockedCancellation = await request(
+      `/bookings/reservations/${pickup.reservation._id}/cancel?property_id=${propertyId}`,
+      {
+        method: "POST",
+        body: { reason: "This cancellation must be blocked" },
+        expectedStatus: 409
+      }
+    );
+    assert.match(blockedCancellation.message, /credit note/i);
+    assert.match(blockedCancellation.message, /refund/i);
+    results.push("issued_invoice_blocks_cancellation");
+
     const blockDetail = await request(
       `/bookings/business-blocks/${block._id}?property_id=${propertyId}`
     );
@@ -267,6 +433,15 @@ async function request(path, options = {}) {
   } catch {
     data = { raw: text };
   }
+  if (options.expectedStatus !== undefined) {
+    if (response.status !== options.expectedStatus) {
+      throw new Error(
+        `${options.method || "GET"} ${path} returned ${response.status}; ` +
+        `expected ${options.expectedStatus}: ${JSON.stringify(data)}`
+      );
+    }
+    return data;
+  }
   if (!response.ok) {
     throw new Error(
       `${options.method || "GET"} ${path} returned ${response.status}: ${JSON.stringify(data)}`
@@ -296,6 +471,8 @@ async function cleanup() {
 
   for (const collectionName of [
     "booking_audit_logs",
+    "document_counters",
+    "invoices",
     "reservation_attachments",
     "reservation_payments",
     "reservations",

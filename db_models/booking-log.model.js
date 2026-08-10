@@ -21,7 +21,7 @@ const BookingAuditLogSchema = new mongoose.Schema(
     },
     entity_type: {
       type: String,
-      enum: ["reservation", "business_block", "invoice", "credit_note"],
+      enum: ["reservation", "business_block", "invoice", "credit_note", "refund"],
       required: true,
       index: true
     },

@@ -1,6 +1,6 @@
-# Invoices and credit notes API
+# Invoices, credit notes, and refunds API
 
-This backend treats an invoice as an official bill for one reservation. A credit note is a correction that reduces an already-issued invoice. Existing reservation payments/transactions remain separate and are linked to an invoice only when a payment is posted through the invoice endpoint.
+This backend treats an invoice as an official bill for one reservation. A credit note reduces an issued invoice. A refund records money returned against a specific posted payment; it does not erase the original payment.
 
 Base URL: `http://localhost:3500/api`
 
@@ -18,21 +18,52 @@ Optional audit headers:
 
 ## Normal workflow
 
-1. Create a draft invoice from a saved reservation.
+1. Confirm a reservation. The backend automatically creates its draft invoice.
 2. Review/edit its bill-to details and lines.
 3. Issue it. Issued invoices are locked.
 4. Post payments against it.
 5. If an issued invoice is wrong, issue a credit note. Do not edit the invoice.
+6. If that credit produces `refund_due`, create and complete a refund against the original payment.
 
 MongoDB creates these collections automatically:
 
 - `invoices`
 - `credit_notes`
+- `refunds`
 - `document_counters`
 - existing `reservation_payments` stores invoice-linked payments
 - existing `booking_audit_logs` stores invoice and credit-note activity
 
 ## 1. Create a draft invoice
+
+A confirmed reservation normally receives one draft invoice automatically. The
+automatic invoice and the related reservation log use this audit actor:
+
+```json
+{
+  "user_id": "system",
+  "name": "System",
+  "email": ""
+}
+```
+
+The automatic operation is idempotent: if the reservation already has an
+invoice, confirming or retrying the workflow does not create a duplicate.
+
+While that automatic invoice remains in `draft`, editing the confirmed
+reservation refreshes its guest snapshot, stay details, accommodation lines,
+currency, and totals. Non-accommodation lines added by staff are preserved.
+Issued invoices are never changed by reservation edits.
+
+Cancelling a reservation automatically voids its draft invoices with the
+`System` audit actor. Cancellation is rejected when an invoice is `issued`,
+`partially_paid`, or `paid`; staff must first issue the required credit note and
+complete any refund. A fully credited or already voided invoice does not block
+cancellation, unless that credited invoice still has a refund due.
+
+Use the manual endpoint below only when staff intentionally needs to create an
+invoice outside the normal confirmation workflow, such as for older migrated
+reservations.
 
 `POST /api/invoices`
 
@@ -88,7 +119,7 @@ The backend generates a readable number such as `INV-2026-000001` and calculates
 - Filter: `GET /api/invoices?property_id=demo&status=issued&date_from=2026-08-01&date_to=2026-08-31`
 - One invoice: `GET /api/invoices/INVOICE_OBJECT_ID?property_id=demo`
 
-The single-invoice response also contains linked payments, credit notes, and audit logs.
+The single-invoice response also contains linked payments, credit notes, refunds, and audit logs.
 
 ## 3. Edit and issue an invoice
 
@@ -216,7 +247,68 @@ Void JSON:
 
 Voiding an issued credit note removes its value from the invoice and recalculates the invoice status.
 
-## 7. Void an invoice
+## 7. Create and complete a refund
+
+A refund is allowed only when an invoice has `refund_due` greater than zero. This normally happens when a fully paid invoice later receives a credit note.
+
+First obtain `invoice._id`, `refund_due`, and the original `payments[0]._id` from:
+
+`GET /api/invoices/INVOICE_OBJECT_ID?property_id=demo`
+
+Create a pending refund:
+
+`POST /api/refunds`
+
+```json
+{
+  "property_id": "demo",
+  "invoice_id": "REPLACE_WITH_INVOICE_OBJECT_ID",
+  "payment_id": "REPLACE_WITH_PAYMENT_OBJECT_ID",
+  "amount": 1000,
+  "refund_method": "bank_transfer",
+  "reference_number": "BANK-REF-1001",
+  "reason": "Returning the overpayment created by credit note CN-2026-000001.",
+  "notes": "Guest confirmed the bank account."
+}
+```
+
+Allowed methods are `cash`, `credit_card`, `debit_card`, `bank_transfer`, `online`, and `other`.
+
+The backend creates a number such as `RF-2026-000001`. A pending refund only reserves the amount; it does not change the invoice or reservation payment total yet.
+
+After the money has actually been returned, complete it:
+
+`POST /api/refunds/REFUND_OBJECT_ID/complete`
+
+```json
+{
+  "property_id": "demo",
+  "reference_number": "BANK-REF-1001"
+}
+```
+
+Completion subtracts the refund from `invoice.paid_amount`, recalculates `refund_due`, and refreshes the reservation paid total.
+
+Other refund endpoints:
+
+- List: `GET /api/refunds?property_id=demo`
+- Search/filter: `GET /api/refunds?property_id=demo&status=pending&search=RF-2026`
+- One: `GET /api/refunds/REFUND_OBJECT_ID?property_id=demo`
+- Edit pending: `PATCH /api/refunds/REFUND_OBJECT_ID`
+- Void: `POST /api/refunds/REFUND_OBJECT_ID/void`
+
+Void JSON:
+
+```json
+{
+  "property_id": "demo",
+  "reason": "The refund was entered against the wrong payment."
+}
+```
+
+Voiding a completed database record only fixes the PMS record; if money was already sent through a bank or card provider, staff must handle that external transaction separately.
+
+## 8. Void an invoice
 
 `POST /api/invoices/INVOICE_OBJECT_ID/void`
 
@@ -227,7 +319,7 @@ Voiding an issued credit note removes its value from the invoice and recalculate
 }
 ```
 
-Payments and issued credit notes must be voided first. This protects the financial audit trail.
+Payments, issued credit notes, and refunds must be voided first. This protects the financial audit trail.
 
 ## Important field meanings
 
@@ -242,4 +334,4 @@ Payments and issued credit notes must be voided first. This protects the financi
 - `refund_due`: amount that should be returned when credits exceed the adjusted unpaid amount.
 - `status`: workflow state; it is not a free-text field.
 
-Credit notes are not payments. A credit reduces what is owed; a payment records money received. A refund can remain in the transaction/payment workflow and should reference the invoice/payment it reverses.
+Credit notes are not payments. A credit reduces what is owed; a payment records money received; a refund records money returned and preserves the original payment for audit purposes.

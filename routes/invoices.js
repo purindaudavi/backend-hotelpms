@@ -2,6 +2,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const Invoice = require("../db_models/invoice.model");
 const CreditNote = require("../db_models/credit-note.model");
+const Refund = require("../db_models/refund.model");
 const Reservation = require("../db_models/booking.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const Guest = require("../db_models/guest.model");
@@ -11,6 +12,7 @@ const {
   buildAccommodationLines,
   nextDocumentNumber,
   refreshInvoiceBalances,
+  refreshReservationPaidTotal,
   serializeFinancialDocument
 } = require("../services/financial-document.service");
 
@@ -157,15 +159,17 @@ router.post("/", asyncHandler(async (req, res) => {
 router.get("/:invoiceId", asyncHandler(async (req, res) => {
   const invoice = await findInvoice(req);
   if (!invoice) throw notFound("Invoice not found.");
-  const [payments, credits, logs] = await Promise.all([
+  const [payments, credits, refunds, logs] = await Promise.all([
     ReservationPayment.find({ property_id: invoice.property_id, invoice_id: invoice._id }).sort({ posted_at: -1 }),
     CreditNote.find({ property_id: invoice.property_id, invoice_id: invoice._id }).sort({ credit_date: -1 }),
+    Refund.find({ property_id: invoice.property_id, invoice_id: invoice._id }).sort({ requested_at: -1 }),
     BookingAuditLog.find({ property_id: invoice.property_id, entity_type: "invoice", entity_id: invoice._id }).sort({ created_at: -1 })
   ]);
   return res.status(200).json({
     invoice: serializeFinancialDocument(invoice),
     payments,
     credits: credits.map(serializeFinancialDocument),
+    refunds: refunds.map(serializeFinancialDocument),
     logs
   });
 }));
@@ -235,12 +239,13 @@ router.post("/:invoiceId/void", asyncHandler(async (req, res) => {
     const record = await findInvoice(req, session);
     if (!record) throw notFound("Invoice not found.");
     if (record.status === "voided") throw conflict("This invoice is already voided.");
-    const [paymentCount, creditCount] = await Promise.all([
+    const [paymentCount, creditCount, refundCount] = await Promise.all([
       ReservationPayment.countDocuments({ invoice_id: record._id, status: { $ne: "voided" } }).session(session),
-      CreditNote.countDocuments({ invoice_id: record._id, status: "issued" }).session(session)
+      CreditNote.countDocuments({ invoice_id: record._id, status: "issued" }).session(session),
+      Refund.countDocuments({ invoice_id: record._id, status: { $ne: "voided" } }).session(session)
     ]);
-    if (paymentCount || creditCount) {
-      throw conflict("Void the invoice payments and issued credit notes before voiding this invoice.");
+    if (paymentCount || creditCount || refundCount) {
+      throw conflict("Void the invoice payments, issued credit notes, and refunds before voiding this invoice.");
     }
     record.status = "voided";
     record.void_reason = reason;
@@ -335,6 +340,12 @@ router.post("/:invoiceId/payments/:paymentId/void", asyncHandler(async (req, res
     }).session(session);
     if (!payment) throw notFound("Invoice payment not found.");
     if (payment.status === "voided") throw conflict("This payment is already voided.");
+    const refundCount = await Refund.countDocuments({
+      property_id: invoice.property_id,
+      payment_id: payment._id,
+      status: { $ne: "voided" }
+    }).session(session);
+    if (refundCount) throw conflict("Void refunds linked to this payment before voiding the payment.");
     payment.status = "voided";
     payment.void_reason = reason;
     payment.voided_by = actor;
@@ -366,23 +377,6 @@ async function findInvoice(req, session) {
     _id: objectId(req.params.invoiceId, "invoiceId"),
     property_id: requirePropertyId(req)
   }).session(session || null);
-}
-
-async function refreshReservationPaidTotal(reservationId, propertyId, session) {
-  const [reservation, payments] = await Promise.all([
-    Reservation.findOne({ _id: reservationId, property_id: propertyId }).session(session),
-    ReservationPayment.find({
-      property_id: propertyId,
-      reservation_id: reservationId,
-      status: { $in: ["posted", "refunded"] }
-    }).session(session)
-  ]);
-  if (!reservation) return;
-  reservation.financial_summary.paid_total = Math.max(payments.reduce(
-    (total, payment) => total + (payment.status === "refunded" ? -payment.amount : payment.amount),
-    0
-  ), 0);
-  await reservation.save({ session });
 }
 
 function writeInvoiceLog({ invoice, action, description, actor, changes = [], req, session }) {

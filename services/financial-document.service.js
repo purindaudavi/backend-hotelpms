@@ -1,11 +1,15 @@
 const DocumentCounter = require("../db_models/document-counter.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const CreditNote = require("../db_models/credit-note.model");
+const Refund = require("../db_models/refund.model");
+const Reservation = require("../db_models/booking.model");
 const { money } = require("../db_models/invoice.model");
 
 async function nextDocumentNumber({ propertyId, documentType, date = new Date(), session }) {
   const year = new Date(date).getUTCFullYear();
-  const prefix = documentType === "credit_note" ? "CN" : "INV";
+  const prefixes = { invoice: "INV", credit_note: "CN", refund: "RF" };
+  const prefix = prefixes[documentType];
+  if (!prefix) throw new Error(`Unsupported financial document type: ${documentType}`);
   const filter = {
     property_id: propertyId,
     document_type: documentType,
@@ -57,7 +61,7 @@ function buildAccommodationLines(reservation) {
 }
 
 async function refreshInvoiceBalances(invoice, session) {
-  const [payments, issuedCredits] = await Promise.all([
+  const [payments, issuedCredits, completedRefunds] = await Promise.all([
     ReservationPayment.find({
       property_id: invoice.property_id,
       invoice_id: invoice._id,
@@ -67,13 +71,20 @@ async function refreshInvoiceBalances(invoice, session) {
       property_id: invoice.property_id,
       invoice_id: invoice._id,
       status: "issued"
+    }).session(session),
+    Refund.find({
+      property_id: invoice.property_id,
+      invoice_id: invoice._id,
+      status: "completed"
     }).session(session)
   ]);
 
-  invoice.paid_amount = money(Math.max(payments.reduce(
+  const received = payments.reduce(
     (total, payment) => total + (payment.status === "refunded" ? -payment.amount : payment.amount),
     0
-  ), 0));
+  );
+  const refunded = completedRefunds.reduce((total, refund) => total + refund.amount, 0);
+  invoice.paid_amount = money(Math.max(received - refunded, 0));
   invoice.credited_amount = money(issuedCredits.reduce(
     (total, credit) => total + credit.total_credit,
     0
@@ -84,6 +95,31 @@ async function refreshInvoiceBalances(invoice, session) {
   }
   await invoice.save({ session });
   return invoice;
+}
+
+async function refreshReservationPaidTotal(reservationId, propertyId, session) {
+  const [reservation, payments, refunds] = await Promise.all([
+    Reservation.findOne({ _id: reservationId, property_id: propertyId }).session(session),
+    ReservationPayment.find({
+      property_id: propertyId,
+      reservation_id: reservationId,
+      status: { $in: ["posted", "refunded"] }
+    }).session(session),
+    Refund.find({
+      property_id: propertyId,
+      reservation_id: reservationId,
+      status: "completed"
+    }).session(session)
+  ]);
+  if (!reservation) return null;
+  const received = payments.reduce(
+    (total, payment) => total + (payment.status === "refunded" ? -payment.amount : payment.amount),
+    0
+  );
+  const refunded = refunds.reduce((total, refund) => total + refund.amount, 0);
+  reservation.financial_summary.paid_total = money(Math.max(received - refunded, 0));
+  await reservation.save({ session });
+  return reservation;
 }
 
 function calculatedInvoiceStatus(invoice) {
@@ -106,5 +142,6 @@ module.exports = {
   calculatedInvoiceStatus,
   nextDocumentNumber,
   refreshInvoiceBalances,
+  refreshReservationPaidTotal,
   serializeFinancialDocument
 };

@@ -14,6 +14,7 @@ const reportRoutes = require("./routes/reports");
 const rateRoutes = require("./routes/rates");
 const invoiceRoutes = require("./routes/invoices");
 const creditRoutes = require("./routes/credits");
+const refundRoutes = require("./routes/refunds");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -44,6 +45,7 @@ app.use("/api/reports", reportRoutes);
 app.use("/api/rates", rateRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/credits", creditRoutes);
+app.use("/api/refunds", refundRoutes);
 
 async function startServer() {
   await connectDatabase();
