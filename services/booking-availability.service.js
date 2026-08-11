@@ -6,6 +6,7 @@ const {
 const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
 const CrossBooking = require("../db_models/crossbooking.model");
+const { HousekeepingActivity } = require("../db_models/housecleaning.model");
 
 async function validateReservationInventory({
   propertyId,
@@ -359,7 +360,10 @@ async function occupyAssignedRooms(reservation, { session } = {}) {
   }
 }
 
-async function releaseAssignedRoomsAfterCheckout(reservation, { session } = {}) {
+async function releaseAssignedRoomsAfterCheckout(
+  reservation,
+  { session, actor = {}, requestId = "" } = {}
+) {
   for (const roomLine of reservation.rooms) {
     if (!roomLine.physical_room_id) continue;
     const roomType = await RoomType.findOne({
@@ -371,6 +375,18 @@ async function releaseAssignedRoomsAfterCheckout(reservation, { session } = {}) 
     physicalRoom.operational_status = "available";
     physicalRoom.housekeeping_status = "dirty";
     await roomType.save({ session });
+    await HousekeepingActivity.create([{
+      property_id: reservation.property_id,
+      physical_room_id: physicalRoom._id,
+      room_type_id: roomType._id,
+      room_number: physicalRoom.room_number,
+      room_type_name: roomType.name,
+      action: "room_marked_dirty",
+      from_status: "occupied",
+      to_status: "dirty",
+      actor,
+      request_id: requestId
+    }], { session });
   }
 }
 

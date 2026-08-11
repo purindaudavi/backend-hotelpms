@@ -218,6 +218,72 @@ router.get("/reservations/:reservationId", asyncHandler(async (req, res) => {
   });
 }));
 
+router.patch("/reservations/:reservationId/email-delivery", asyncHandler(async (req, res) => {
+  const status = normalizeEnum(req.body?.status);
+  const allowedStatuses = new Set(Reservation.EMAIL_STATUSES || []);
+  if (!allowedStatuses.has(status)) {
+    throw badRequest(
+      "Email delivery status must be not_requested, pending, accepted, sent, or failed."
+    );
+  }
+
+  const category = String(req.body?.category || "").trim().toLowerCase();
+  if (!category) throw badRequest("Email category is required.");
+
+  const actor = actorFromRequest(req);
+  const reservation = await inTransaction(async (session) => {
+    const record = await findReservation(req, session);
+    if (!record) throw notFound("Reservation not found.");
+
+    const now = new Date();
+    const previousStatus = record.email_delivery?.status || "not_requested";
+    record.email_delivery.status = status;
+    record.email_delivery.last_category = category;
+    record.email_delivery.requested_at = parseOptionalDateTime(
+      req.body?.requested_at,
+      now
+    );
+    record.email_delivery.failure_message =
+      status === "failed"
+        ? String(req.body?.failure_message || "Email delivery failed.").trim()
+        : "";
+
+    if (["accepted", "sent"].includes(status)) {
+      record.email_delivery.sent_at = parseOptionalDateTime(
+        req.body?.sent_at,
+        now
+      );
+    } else {
+      record.email_delivery.sent_at = undefined;
+    }
+
+    record.updated_by = actor;
+    await record.save({ session });
+    await writeAuditLog({
+      propertyId: record.property_id,
+      entityType: "reservation",
+      entityId: record._id,
+      action: status === "failed" ? "email_delivery_failed" : "email_delivery_updated",
+      description:
+        status === "failed"
+          ? `${category} email delivery failed for reservation ${record.reservation_no}.`
+          : `${category} email for reservation ${record.reservation_no} was ${status}.`,
+      actor,
+      changes: [
+        { field: "email_delivery.status", from: previousStatus, to: status }
+      ],
+      requestId: requestId(req),
+      session
+    });
+    return record;
+  });
+
+  return res.status(200).json({
+    message: "Reservation email delivery status updated successfully.",
+    reservation: serializeReservation(reservation)
+  });
+}));
+
 router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
   if (Object.prototype.hasOwnProperty.call(req.body || {}, "status")) {
     throw badRequest("Use a reservation lifecycle endpoint to change status.");
@@ -362,7 +428,11 @@ router.post("/reservations/:reservationId/check-out", asyncHandler(async (req, r
     if (record.status !== "checked_in") {
       throw conflict("Only a checked-in reservation can be checked out.");
     }
-    await releaseAssignedRoomsAfterCheckout(record, { session });
+    await releaseAssignedRoomsAfterCheckout(record, {
+      session,
+      actor,
+      requestId: requestId(req)
+    });
     record.status = "checked_out";
     record.checked_out_at = new Date();
     record.checked_out_by = actor;
@@ -1454,6 +1524,7 @@ function serializeReservationSummary(reservation) {
     booker: value.booker,
     currency: value.currency,
     financial_summary: value.financial_summary,
+    email_delivery: value.email_delivery,
     balance: value.balance,
     version: value.version
   };
@@ -1664,6 +1735,13 @@ function normalizeEnum(value) {
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, "_");
+}
+
+function parseOptionalDateTime(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) throw badRequest("Email delivery date is invalid.");
+  return parsed;
 }
 
 function escapeRegExp(value) {
