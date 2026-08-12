@@ -17,6 +17,7 @@ const creditRoutes = require("./routes/credits");
 const refundRoutes = require("./routes/refunds");
 const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
+const propertyRoutes = require("./routes/property");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -50,6 +51,7 @@ app.use("/api/credits", creditRoutes);
 app.use("/api/refunds", refundRoutes);
 app.use("/api/travel-agents", travelAgentRoutes);
 app.use("/api/housekeeping", housekeepingRoutes);
+app.use("/api/properties", propertyRoutes);
 
 async function startServer() {
   await connectDatabase();

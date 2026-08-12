@@ -28,7 +28,8 @@ const BookingAuditLogSchema = new mongoose.Schema(
         "credit_note",
         "refund",
         "travel_agent",
-        "housekeeping_task"
+        "housekeeping_task",
+        "property"
       ],
       required: true,
       index: true
