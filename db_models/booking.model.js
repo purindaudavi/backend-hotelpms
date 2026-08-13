@@ -85,6 +85,44 @@ const TravelAgentSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const MealAmountSnapshotSchema = new mongoose.Schema(
+  {
+    breakfast: { type: Number, min: 0, default: 0 },
+    lunch: { type: Number, min: 0, default: 0 },
+    dinner: { type: Number, min: 0, default: 0 }
+  },
+  { _id: false }
+);
+
+// This is copied from the linked rate plan when the reservation is saved.
+// Historical reservations and invoices therefore do not change when an
+// administrator later edits or retires the property meal allocation.
+const MealAllocationSnapshotSchema = new mongoose.Schema(
+  {
+    meal_allocation_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "MealAllocation",
+      required: true
+    },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    meal_plan: { type: String, required: true, trim: true, maxlength: 100 },
+    currency: {
+      type: String,
+      required: true,
+      trim: true,
+      uppercase: true,
+      minlength: 3,
+      maxlength: 3
+    },
+    adult_amounts: { type: MealAmountSnapshotSchema, default: () => ({}) },
+    child_amounts: { type: MealAmountSnapshotSchema, default: () => ({}) },
+    valid_from: { type: Date, required: true },
+    valid_to: { type: Date, required: true },
+    captured_at: { type: Date, required: true, default: Date.now }
+  },
+  { _id: false }
+);
+
 const ReservationRoomSchema = new mongoose.Schema(
   {
     room_type_id: {
@@ -110,6 +148,11 @@ const ReservationRoomSchema = new mongoose.Schema(
     rate_plan_id: { type: String, trim: true, maxlength: 120, default: "" },
     rate_plan_name: { type: String, trim: true, maxlength: 150, default: "" },
     meal_plan: { type: String, trim: true, maxlength: 100, default: "" },
+    meal_allocation_snapshot: {
+      type: MealAllocationSnapshotSchema,
+      required: false,
+      default: undefined
+    },
     currency: {
       type: String,
       trim: true,

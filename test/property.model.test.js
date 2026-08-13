@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const Property = require("../db_models/property.model");
-const { PropertyImage } = require("../db_models/property.model");
+const { PropertyImage, MealAllocation } = require("../db_models/property.model");
 
 function validProperty(overrides = {}) {
   return new Property({
@@ -117,6 +117,43 @@ test("rejects unsupported property image metadata", async () => {
     assert.ok(error.errors.image_type);
     assert.ok(error.errors.content_type);
     assert.ok(error.errors.size);
+    return true;
+  });
+});
+
+test("validates and normalizes effective-dated meal allocations", async () => {
+  const allocation = new MealAllocation({
+    property_id: " demo ",
+    name: " Standard   B&B Allocation ",
+    meal_plan: "Bed & Breakfast",
+    currency: "lkr",
+    adult_amounts: { breakfast: 2000, lunch: 0, dinner: 0 },
+    child_amounts: { breakfast: 1000, lunch: 0, dinner: 0 },
+    valid_from: "2026-08-01",
+    valid_to: "2027-07-31"
+  });
+
+  await allocation.validate();
+  assert.equal(allocation.property_id, "demo");
+  assert.equal(allocation.name, "Standard B&B Allocation");
+  assert.equal(allocation.currency, "LKR");
+  assert.equal(allocation.valid_from.toISOString(), "2026-08-01T00:00:00.000Z");
+});
+
+test("rejects meals outside the selected plan and reversed validity dates", async () => {
+  const allocation = new MealAllocation({
+    property_id: "demo",
+    name: "Invalid B&B",
+    meal_plan: "Bed & Breakfast",
+    currency: "LKR",
+    adult_amounts: { breakfast: 2000, lunch: 500, dinner: 0 },
+    valid_from: "2026-08-10",
+    valid_to: "2026-08-01"
+  });
+
+  await assert.rejects(allocation.validate(), (error) => {
+    assert.ok(error.errors["adult_amounts.lunch"]);
+    assert.ok(error.errors.valid_to);
     return true;
   });
 });

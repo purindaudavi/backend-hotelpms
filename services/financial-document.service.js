@@ -4,6 +4,7 @@ const CreditNote = require("../db_models/credit-note.model");
 const Refund = require("../db_models/refund.model");
 const Reservation = require("../db_models/booking.model");
 const { money } = require("../db_models/invoice.model");
+const { mealAllocationBreakdown } = require("./meal-allocation.service");
 
 async function nextDocumentNumber({ propertyId, documentType, date = new Date(), session }) {
   const year = new Date(date).getUTCFullYear();
@@ -43,21 +44,51 @@ function buildAccommodationLines(reservation) {
     ? 1
     : Math.max(Math.ceil((reservation.check_out - reservation.check_in) / 86_400_000), 1);
 
-  return reservation.rooms.map((room) => ({
-    source_type: "accommodation",
-    source_id: String(room._id),
-    service_date: reservation.check_in,
-    description: [
-      room.room_type_name,
-      room.room_number ? `Room ${room.room_number}` : "",
-      reservation.is_day_room ? "Day use" : `${nights} night${nights === 1 ? "" : "s"}`
-    ].filter(Boolean).join(" - "),
-    room_number: room.room_number,
-    quantity: nights,
-    unit_price: room.is_complimentary ? 0 : room.effective_nightly_rate,
-    discount_amount: 0,
-    tax_rate: 0
-  }));
+  return reservation.rooms.flatMap((room) => {
+    const mealLines = mealAllocationBreakdown(room);
+    const nightlyMealTotal = mealLines.reduce((total, line) => total + line.amount, 0);
+    const accommodationRate = room.is_complimentary
+      ? 0
+      : money(Math.max(Number(room.effective_nightly_rate || 0) - nightlyMealTotal, 0));
+    const stayDescription = reservation.is_day_room
+      ? "Day use"
+      : `${nights} night${nights === 1 ? "" : "s"}`;
+    const accommodation = {
+      source_type: "accommodation",
+      source_id: String(room._id),
+      service_date: reservation.check_in,
+      description: [
+        room.room_type_name,
+        room.room_number ? `Room ${room.room_number}` : "",
+        stayDescription
+      ].filter(Boolean).join(" - "),
+      room_number: room.room_number,
+      quantity: nights,
+      unit_price: accommodationRate,
+      discount_amount: 0,
+      tax_rate: 0
+    };
+    const meals = mealLines.map(({ meal, amount }) => ({
+      source_type: "meal",
+      source_id: `meal-allocation:${String(room._id)}:${meal}`,
+      service_date: reservation.check_in,
+      description: [
+        capitalize(meal),
+        room.meal_allocation_snapshot.name,
+        room.room_number ? `Room ${room.room_number}` : room.room_type_name
+      ].filter(Boolean).join(" - "),
+      room_number: room.room_number,
+      quantity: nights,
+      unit_price: amount,
+      discount_amount: 0,
+      tax_rate: 0
+    }));
+    return [accommodation, ...meals];
+  });
+}
+
+function capitalize(value) {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
 
 async function refreshInvoiceBalances(invoice, session) {

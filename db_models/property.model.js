@@ -275,6 +275,98 @@ const PropertyImageSchema = new mongoose.Schema(
   }
 );
 
+const MealAmountSchema = new mongoose.Schema(
+  {
+    breakfast: { type: Number, min: [0, "Breakfast allocation cannot be negative."], default: 0 },
+    lunch: { type: Number, min: [0, "Lunch allocation cannot be negative."], default: 0 },
+    dinner: { type: Number, min: [0, "Dinner allocation cannot be negative."], default: 0 }
+  },
+  { _id: false }
+);
+
+const MEAL_PLANS = [
+  "Room Only",
+  "Bed & Breakfast",
+  "Half Board",
+  "Full Board",
+  "All Inclusive"
+];
+
+const MealAllocationSchema = new mongoose.Schema(
+  {
+    property_id: {
+      type: String,
+      required: [true, "Property ID is required."],
+      trim: true,
+      maxlength: [100, "Property ID cannot exceed 100 characters."],
+      index: true
+    },
+    name: {
+      type: String,
+      required: [true, "Allocation name is required."],
+      trim: true,
+      minlength: [2, "Allocation name must contain at least 2 characters."],
+      maxlength: [120, "Allocation name cannot exceed 120 characters."]
+    },
+    meal_plan: {
+      type: String,
+      required: [true, "Meal plan is required."],
+      enum: { values: MEAL_PLANS, message: "Meal plan is not supported." },
+      index: true
+    },
+    currency: {
+      type: String,
+      required: [true, "Currency is required."],
+      trim: true,
+      uppercase: true,
+      match: [/^[A-Z]{3}$/, "Currency must be a 3-letter currency code."]
+    },
+    adult_amounts: { type: MealAmountSchema, default: () => ({}) },
+    child_amounts: { type: MealAmountSchema, default: () => ({}) },
+    valid_from: { type: Date, required: [true, "Valid-from date is required."], index: true },
+    valid_to: { type: Date, required: [true, "Valid-to date is required."], index: true },
+    active: { type: Boolean, default: true, index: true },
+    notes: { type: String, trim: true, maxlength: 1000, default: "" },
+    created_by: { type: ActorSchema, default: () => ({}) },
+    updated_by: { type: ActorSchema, default: () => ({}) }
+  },
+  {
+    timestamps: { createdAt: "created_at", updatedAt: "updated_at" },
+    optimisticConcurrency: true,
+    versionKey: "version",
+    collection: "meal_allocations",
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
+  }
+);
+
+MealAllocationSchema.index({ property_id: 1, meal_plan: 1, valid_from: 1, valid_to: 1 });
+MealAllocationSchema.index({ property_id: 1, active: 1, valid_from: 1 });
+
+MealAllocationSchema.pre("validate", function normalizeMealAllocation() {
+  this.property_id = String(this.property_id || "").trim();
+  this.name = collapseWhitespace(this.name);
+  this.currency = String(this.currency || "").trim().toUpperCase();
+  this.valid_from = dateOnly(this.valid_from);
+  this.valid_to = dateOnly(this.valid_to);
+
+  if (this.valid_from && this.valid_to && this.valid_to < this.valid_from) {
+    this.invalidate("valid_to", "Valid-to date cannot be before valid-from date.");
+  }
+
+  const allowedMeals = mealsForPlan(this.meal_plan);
+  for (const audience of ["adult_amounts", "child_amounts"]) {
+    for (const meal of ["breakfast", "lunch", "dinner"]) {
+      if (!allowedMeals.has(meal) && Number(this[audience]?.[meal] || 0) !== 0) {
+        this.invalidate(
+          `${audience}.${meal}`,
+          `${capitalize(meal)} is not included in the ${this.meal_plan} meal plan.`
+        );
+      }
+    }
+  }
+});
+
 PropertyImageSchema.index(
   { property_id: 1, image_type: 1 },
   {
@@ -325,8 +417,35 @@ const PropertyImage =
   mongoose.models.PropertyImage ||
   mongoose.model("PropertyImage", PropertyImageSchema, "property_images");
 
+const MealAllocation =
+  mongoose.models.MealAllocation ||
+  mongoose.model("MealAllocation", MealAllocationSchema, "meal_allocations");
+
+function mealsForPlan(mealPlan) {
+  if (mealPlan === "Bed & Breakfast") return new Set(["breakfast"]);
+  if (mealPlan === "Half Board") return new Set(["breakfast", "dinner"]);
+  if (["Full Board", "All Inclusive"].includes(mealPlan)) {
+    return new Set(["breakfast", "lunch", "dinner"]);
+  }
+  return new Set();
+}
+
+function dateOnly(value) {
+  if (!value) return value;
+  const parsed = value instanceof Date ? value : new Date(`${value}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate()));
+}
+
+function capitalize(value) {
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+}
+
 module.exports = Property;
 module.exports.PropertyImage = PropertyImage;
+module.exports.MealAllocation = MealAllocation;
 module.exports.PropertySchema = PropertySchema;
 module.exports.PropertyInfoSchema = PropertyInfoSchema;
 module.exports.PropertyImageSchema = PropertyImageSchema;
+module.exports.MealAllocationSchema = MealAllocationSchema;
+module.exports.MEAL_PLANS = MEAL_PLANS;

@@ -29,7 +29,8 @@ const BookingAuditLogSchema = new mongoose.Schema(
         "refund",
         "travel_agent",
         "housekeeping_task",
-        "property"
+        "property",
+        "meal_allocation"
       ],
       required: true,
       index: true

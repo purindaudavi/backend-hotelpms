@@ -117,6 +117,36 @@ test("builds accommodation lines from the reservation's saved room rates", () =>
   assert.match(lines[0].description, /3 nights/);
 });
 
+test("splits an included meal allocation without increasing the invoice total", () => {
+  const roomLineId = new mongoose.Types.ObjectId();
+  const lines = buildAccommodationLines({
+    check_in: new Date("2026-08-12T00:00:00.000Z"),
+    check_out: new Date("2026-08-15T00:00:00.000Z"),
+    is_day_room: false,
+    rooms: [{
+      _id: roomLineId,
+      room_type_name: "Test Room",
+      room_number: "14",
+      adults: 2,
+      children: 0,
+      effective_nightly_rate: 15000,
+      is_complimentary: false,
+      meal_allocation_snapshot: {
+        name: "Standard breakfast allocation",
+        adult_amounts: { breakfast: 2000, lunch: 0, dinner: 0 },
+        child_amounts: { breakfast: 1000, lunch: 0, dinner: 0 }
+      }
+    }]
+  });
+
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].source_type, "accommodation");
+  assert.equal(lines[0].unit_price, 11000);
+  assert.equal(lines[1].source_type, "meal");
+  assert.equal(lines[1].unit_price, 4000);
+  assert.equal(lines.reduce((total, line) => total + line.quantity * line.unit_price, 0), 45000);
+});
+
 test("calculates readable invoice payment statuses", () => {
   assert.equal(calculatedInvoiceStatus({ grand_total: 1000, paid_amount: 0, credited_amount: 0 }), "issued");
   assert.equal(calculatedInvoiceStatus({ grand_total: 1000, paid_amount: 400, credited_amount: 0 }), "partially_paid");

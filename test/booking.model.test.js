@@ -88,6 +88,26 @@ test("rejects an invalid reservation stay range", async () => {
   await assert.rejects(reservation.validate(), /Check-out must be after check-in/);
 });
 
+test("stores a meal allocation snapshot on a reservation room", async () => {
+  const allocationId = new mongoose.Types.ObjectId();
+  const reservation = validReservation();
+  reservation.rooms[0].meal_plan = "Bed & Breakfast";
+  reservation.rooms[0].meal_allocation_snapshot = {
+    meal_allocation_id: allocationId,
+    name: "Standard breakfast allocation",
+    meal_plan: "Bed & Breakfast",
+    currency: "LKR",
+    adult_amounts: { breakfast: 2000, lunch: 0, dinner: 0 },
+    child_amounts: { breakfast: 1000, lunch: 0, dinner: 0 },
+    valid_from: "2026-08-01",
+    valid_to: "2026-08-31"
+  };
+
+  await reservation.validate();
+  assert.equal(reservation.rooms[0].meal_allocation_snapshot.name, "Standard breakfast allocation");
+  assert.equal(reservation.rooms[0].meal_allocation_snapshot.adult_amounts.breakfast, 2000);
+});
+
 test("rejects duplicate primary occupants for one reservation room", async () => {
   const reservation = validReservation();
   const roomLineId = reservation.rooms[0]._id;

@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
+const { MealAllocation } = require("../db_models/property.model");
 
 const MAX_QUOTE_NIGHTS = 365;
 
@@ -10,6 +11,8 @@ async function quoteRatePlan({
   roomTypeId,
   checkIn,
   checkOut,
+  adults = 1,
+  children = 0,
   dayRoom = false,
   allowInactive = false
 }) {
@@ -45,6 +48,8 @@ async function quoteRatePlan({
   if (!roomType.active) {
     throw httpError(409, "This room type is disabled and cannot be quoted.", "ROOM_TYPE_DISABLED");
   }
+
+  const occupancy = occupancyPrice(roomType, adults, children);
 
   const planStart = startOfUtcDay(plan.valid_from);
   const planEnd = startOfUtcDay(plan.valid_to);
@@ -112,13 +117,21 @@ async function quoteRatePlan({
 
   const nightlyRates = stayDates.map((date) => {
     const override = overridesByDate.get(dateKey(date));
+    const baseAmount = override ? override.amount : roomTypeRate.amount;
     return {
       date: dateKey(date),
-      amount: override ? override.amount : roomTypeRate.amount,
+      base_amount: baseAmount,
+      occupancy_supplement: occupancy.nightly_supplement,
+      amount: money(baseAmount + occupancy.nightly_supplement),
       source: override ? "daily_rate" : "rate_plan"
     };
   });
   const total = nightlyRates.reduce((sum, rate) => sum + rate.amount, 0);
+  const mealAllocation = await resolveMealAllocationForQuote({
+    plan,
+    propertyId,
+    stayDates
+  });
 
   return {
     property_id: propertyId,
@@ -129,6 +142,8 @@ async function quoteRatePlan({
     room_type_name: roomType.name,
     currency: plan.currency,
     meal_plan: plan.meal_plan,
+    occupancy_pricing: occupancy,
+    meal_allocation: mealAllocation ? serializeMealAllocation(mealAllocation) : null,
     refundable: plan.refundable,
     cancellation_policy: plan.cancellation_policy,
     check_in: dateKey(arrival),
@@ -138,6 +153,101 @@ async function quoteRatePlan({
     nightly_rates: nightlyRates,
     average_nightly_rate: stayLength ? total / stayLength : 0,
     total
+  };
+}
+
+function occupancyPrice(roomType, adultsValue, childrenValue) {
+  const adults = wholeNumber(adultsValue, "adults", 1);
+  const children = wholeNumber(childrenValue, "children", 0);
+  if (adults > roomType.maximum_adults) {
+    throw httpError(
+      409,
+      `${roomType.name} allows at most ${roomType.maximum_adults} adult(s).`,
+      "ADULT_CAPACITY_EXCEEDED"
+    );
+  }
+  if (children > roomType.maximum_children) {
+    throw httpError(
+      409,
+      `${roomType.name} allows at most ${roomType.maximum_children} child(ren).`,
+      "CHILD_CAPACITY_EXCEEDED"
+    );
+  }
+  const includedAdults = Number(roomType.included_adults ?? 1);
+  const includedChildren = Number(roomType.included_children ?? 0);
+  const extraAdults = Math.max(adults - includedAdults, 0);
+  const extraChildren = Math.max(children - includedChildren, 0);
+  const extraAdultRate = Number(roomType.extra_adult_rate || 0);
+  const extraChildRate = Number(roomType.extra_child_rate || 0);
+  return {
+    adults,
+    children,
+    included_adults: includedAdults,
+    included_children: includedChildren,
+    extra_adults: extraAdults,
+    extra_children: extraChildren,
+    extra_adult_rate: extraAdultRate,
+    extra_child_rate: extraChildRate,
+    nightly_supplement: money(
+      extraAdults * extraAdultRate + extraChildren * extraChildRate
+    )
+  };
+}
+
+function wholeNumber(value, field, minimum) {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < minimum) {
+    throw httpError(400, `${field} must be a whole number of at least ${minimum}.`);
+  }
+  return number;
+}
+
+function money(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+async function resolveMealAllocationForQuote({ plan, propertyId, stayDates }) {
+  if (plan.meal_plan === "Room Only") return null;
+  if (!plan.meal_allocation_id) {
+    throw httpError(
+      409,
+      "This meal-inclusive rate plan is not linked to a meal allocation.",
+      "MEAL_ALLOCATION_NOT_CONFIGURED"
+    );
+  }
+  const allocation = await MealAllocation.findOne({
+    _id: plan.meal_allocation_id,
+    property_id: propertyId
+  });
+  if (!allocation || !allocation.active) {
+    throw httpError(409, "The linked meal allocation is unavailable.", "MEAL_ALLOCATION_UNAVAILABLE");
+  }
+  if (allocation.meal_plan !== plan.meal_plan || allocation.currency !== plan.currency) {
+    throw httpError(409, "The linked meal allocation does not match this rate plan.", "MEAL_ALLOCATION_MISMATCH");
+  }
+  const allocationStart = startOfUtcDay(allocation.valid_from);
+  const allocationEnd = startOfUtcDay(allocation.valid_to);
+  const uncoveredDate = stayDates.find((date) => date < allocationStart || date > allocationEnd);
+  if (uncoveredDate) {
+    throw httpError(
+      409,
+      `The linked meal allocation does not cover ${dateKey(uncoveredDate)}.`,
+      "MEAL_ALLOCATION_OUTSIDE_VALIDITY"
+    );
+  }
+  return allocation;
+}
+
+function serializeMealAllocation(allocation) {
+  return {
+    _id: allocation._id,
+    name: allocation.name,
+    meal_plan: allocation.meal_plan,
+    currency: allocation.currency,
+    adult_amounts: allocation.adult_amounts,
+    child_amounts: allocation.child_amounts,
+    valid_from: dateKey(allocation.valid_from),
+    valid_to: dateKey(allocation.valid_to)
   };
 }
 

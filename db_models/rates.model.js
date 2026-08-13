@@ -63,6 +63,13 @@ const RatePlanSchema = new mongoose.Schema(
       maxlength: 100,
       default: "Room Only"
     },
+    meal_allocation_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "MealAllocation",
+      required: false,
+      default: null,
+      index: true
+    },
     valid_from: {
       type: Date,
       required: [true, "Rate plan start date is required."],
@@ -142,6 +149,7 @@ RatePlanSchema.index(
   { unique: true, name: "unique_rate_plan_name_per_property" }
 );
 RatePlanSchema.index({ property_id: 1, active: 1, valid_from: 1, valid_to: 1 });
+RatePlanSchema.index({ property_id: 1, meal_allocation_id: 1 });
 
 RatePlanSchema.pre("validate", function normalizeAndValidateRatePlan() {
   this.property_id = String(this.property_id || "").trim();
@@ -150,6 +158,7 @@ RatePlanSchema.pre("validate", function normalizeAndValidateRatePlan() {
   this.code = String(this.code || "").trim().toUpperCase();
   this.currency = String(this.currency || "").trim().toUpperCase();
   this.meal_plan = normalizeText(this.meal_plan);
+  if (this.meal_plan === "Room Only") this.meal_allocation_id = null;
   this.cancellation_policy = String(this.cancellation_policy || "").trim();
 
   if (this.valid_from && this.valid_to && this.valid_to < this.valid_from) {

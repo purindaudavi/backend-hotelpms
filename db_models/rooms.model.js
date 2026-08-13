@@ -133,6 +133,32 @@ const RoomTypeSchema = new mongoose.Schema(
       max: 30,
       default: 0
     },
+    included_adults: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 30,
+      default: 1
+    },
+    included_children: {
+      type: Number,
+      required: true,
+      min: 0,
+      max: 30,
+      default: 0
+    },
+    extra_adult_rate: {
+      type: Number,
+      required: true,
+      min: 0,
+      default: 0
+    },
+    extra_child_rate: {
+      type: Number,
+      required: true,
+      min: 0,
+      default: 0
+    },
     base_rate: {
       type: Number,
       required: true,
@@ -229,6 +255,19 @@ RoomTypeSchema.pre("validate", function normalizeAndValidateRoomType() {
         .filter(Boolean)
     )
   );
+
+  if (this.included_adults > this.maximum_adults) {
+    this.invalidate(
+      "included_adults",
+      "Adults included in the base rate cannot exceed maximum adults."
+    );
+  }
+  if (this.included_children > this.maximum_children) {
+    this.invalidate(
+      "included_children",
+      "Children included in the base rate cannot exceed maximum children."
+    );
+  }
 
   const normalizedRoomNumbers = this.physical_rooms.map((room) =>
     room.room_number.trim().toLowerCase()

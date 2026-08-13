@@ -7,7 +7,11 @@ function validRoomType(overrides = {}) {
     property_id: "demo",
     name: "Deluxe New Next",
     maximum_adults: 2,
-    maximum_children: 0,
+    maximum_children: 1,
+    included_adults: 2,
+    included_children: 0,
+    extra_adult_rate: 2000,
+    extra_child_rate: 1000,
     base_rate: 6500,
     currency: "LKR",
     description: "A shared room type used by physical rooms 16 and 17.",
@@ -40,6 +44,8 @@ test("validates and normalizes a room type", async () => {
   assert.equal(roomType.slug, "deluxe-new-next");
   assert.deepEqual(roomType.amenities, ["Air Conditioner", "Fan"]);
   assert.equal(roomType.physical_room_count, 2);
+  assert.equal(roomType.included_adults, 2);
+  assert.equal(roomType.extra_child_rate, 1000);
 });
 
 test("rejects duplicate physical room numbers inside one room type", async () => {
@@ -78,4 +84,15 @@ test("rejects invalid capacity and negative rates", async () => {
   });
 
   await assert.rejects(roomType.validate(), /less than minimum allowed value/);
+});
+
+test("rejects base-rate occupancy above room capacity", async () => {
+  await assert.rejects(
+    validRoomType({ included_adults: 3 }).validate(),
+    /cannot exceed maximum adults/
+  );
+  await assert.rejects(
+    validRoomType({ included_children: 2 }).validate(),
+    /cannot exceed maximum children/
+  );
 });

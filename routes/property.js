@@ -1,7 +1,7 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const Property = require("../db_models/property.model");
-const { PropertyImage } = require("../db_models/property.model");
+const { PropertyImage, MealAllocation } = require("../db_models/property.model");
 const RoomType = require("../db_models/rooms.model");
 const BookingAuditLog = require("../db_models/booking-log.model");
 const {
@@ -45,6 +45,18 @@ const PROPERTY_INFO_FIELDS = [
   "longitude",
   "ibe_logo_width",
   "ibe_logo_height"
+];
+
+const MEAL_ALLOCATION_FIELDS = [
+  "name",
+  "meal_plan",
+  "currency",
+  "adult_amounts",
+  "child_amounts",
+  "valid_from",
+  "valid_to",
+  "active",
+  "notes"
 ];
 
 router.post("/", asyncHandler(async (req, res) => {
@@ -92,6 +104,108 @@ router.get("/:propertyId/audit-log", asyncHandler(async (req, res) => {
   }).sort({ created_at: -1 }).limit(limit);
 
   return res.status(200).json({ count: logs.length, logs });
+}));
+
+router.get("/:propertyId/meal-allocations", asyncHandler(async (req, res) => {
+  const property = await requireProperty(req.params.propertyId);
+  const query = { property_id: property.property_id };
+  if (String(req.query.include_inactive || "").toLowerCase() !== "true") {
+    query.active = true;
+  }
+  const allocations = await MealAllocation.find(query)
+    .sort({ active: -1, valid_from: -1, meal_plan: 1, name: 1 });
+
+  return res.status(200).json({
+    count: allocations.length,
+    meal_allocations: allocations.map(serializeMealAllocation)
+  });
+}));
+
+router.post("/:propertyId/meal-allocations", asyncHandler(async (req, res) => {
+  const property = await requireProperty(req.params.propertyId);
+  const actor = actorFromRequest(req);
+  const allocation = new MealAllocation({
+    property_id: property.property_id,
+    created_by: actor,
+    updated_by: actor
+  });
+  applyMealAllocationPayload(allocation, req.body || {});
+  await allocation.validate();
+  await assertNoMealAllocationOverlap(allocation);
+  await allocation.save();
+
+  await writeAuditLog({
+    propertyId: property.property_id,
+    entityType: "meal_allocation",
+    entityId: allocation._id,
+    action: "meal_allocation_created",
+    description: `Meal allocation ${allocation.name} was created.`,
+    actor,
+    requestId: requestId(req)
+  });
+
+  return res.status(201).json({
+    message: "Meal allocation created successfully.",
+    meal_allocation: serializeMealAllocation(allocation)
+  });
+}));
+
+router.patch("/:propertyId/meal-allocations/:allocationId", asyncHandler(async (req, res) => {
+  const property = await requireProperty(req.params.propertyId);
+  const allocation = await findMealAllocation(property.property_id, req.params.allocationId);
+  if (!allocation) throw httpError(404, "Meal allocation not found.");
+  if (req.body?.version !== undefined && Number(req.body.version) !== allocation.version) {
+    throw httpError(409, "Meal allocation changed after this page was loaded. Refresh and try again.");
+  }
+
+  const before = allocation.toObject({ virtuals: false });
+  applyMealAllocationPayload(allocation, req.body || {});
+  allocation.updated_by = actorFromRequest(req);
+  await allocation.validate();
+  await assertNoMealAllocationOverlap(allocation);
+  await allocation.save();
+  const after = allocation.toObject({ virtuals: false });
+  const changes = changesFromPayload(before, after, MEAL_ALLOCATION_FIELDS);
+
+  await writeAuditLog({
+    propertyId: property.property_id,
+    entityType: "meal_allocation",
+    entityId: allocation._id,
+    action: "meal_allocation_updated",
+    description: `Meal allocation ${allocation.name} was updated.`,
+    actor: allocation.updated_by,
+    changes,
+    requestId: requestId(req)
+  });
+
+  return res.status(200).json({
+    message: "Meal allocation updated successfully.",
+    meal_allocation: serializeMealAllocation(allocation)
+  });
+}));
+
+router.delete("/:propertyId/meal-allocations/:allocationId", asyncHandler(async (req, res) => {
+  const property = await requireProperty(req.params.propertyId);
+  const allocation = await findMealAllocation(property.property_id, req.params.allocationId);
+  if (!allocation) throw httpError(404, "Meal allocation not found.");
+
+  allocation.active = false;
+  allocation.updated_by = actorFromRequest(req);
+  await allocation.save();
+  await writeAuditLog({
+    propertyId: property.property_id,
+    entityType: "meal_allocation",
+    entityId: allocation._id,
+    action: "meal_allocation_retired",
+    description: `Meal allocation ${allocation.name} was retired.`,
+    actor: allocation.updated_by,
+    requestId: requestId(req)
+  });
+
+  return res.status(200).json({
+    message: "Meal allocation retired successfully.",
+    meal_allocation: serializeMealAllocation(allocation)
+  });
 }));
 
 router.get("/:propertyId", asyncHandler(async (req, res) => {
@@ -387,6 +501,60 @@ function applyInfoPayload(info, payload) {
         : payload[field];
     }
   }
+}
+
+function applyMealAllocationPayload(allocation, payload) {
+  for (const field of ["name", "meal_plan", "currency", "valid_from", "valid_to", "active", "notes"]) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) allocation[field] = payload[field];
+  }
+  for (const audience of ["adult_amounts", "child_amounts"]) {
+    if (!Object.prototype.hasOwnProperty.call(payload, audience)) continue;
+    allocation[audience] = allocation[audience] || {};
+    for (const meal of ["breakfast", "lunch", "dinner"]) {
+      if (Object.prototype.hasOwnProperty.call(payload[audience] || {}, meal)) {
+        allocation[audience][meal] = payload[audience][meal];
+      }
+    }
+  }
+}
+
+async function assertNoMealAllocationOverlap(allocation) {
+  if (!allocation.active) return;
+  const conflict = await MealAllocation.findOne({
+    _id: { $ne: allocation._id },
+    property_id: allocation.property_id,
+    meal_plan: allocation.meal_plan,
+    currency: allocation.currency,
+    active: true,
+    valid_from: { $lte: allocation.valid_to },
+    valid_to: { $gte: allocation.valid_from }
+  }).select("name valid_from valid_to");
+  if (conflict) {
+    throw httpError(
+      409,
+      `${allocation.meal_plan} already has an active ${allocation.currency} allocation (${conflict.name}) for overlapping dates.`
+    );
+  }
+}
+
+function serializeMealAllocation(allocation) {
+  const value = allocation.toObject({ virtuals: true });
+  return {
+    ...value,
+    valid_from: dateKey(value.valid_from),
+    valid_to: dateKey(value.valid_to)
+  };
+}
+
+function dateKey(value) {
+  return value instanceof Date && !Number.isNaN(value.getTime())
+    ? value.toISOString().slice(0, 10)
+    : "";
+}
+
+async function findMealAllocation(propertyId, allocationId) {
+  if (!mongoose.isValidObjectId(allocationId)) return null;
+  return MealAllocation.findOne({ _id: allocationId, property_id: propertyId });
 }
 
 async function serializeProperty(property) {

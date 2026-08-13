@@ -154,8 +154,11 @@ async function synchronizeAutomaticDraftInvoice({
 
   const guest = await findReservationGuest(reservation, session);
   const before = invoice.toObject({ virtuals: true });
-  const nonAccommodationLines = invoice.line_items
-    .filter((line) => line.source_type !== "accommodation")
+  const manualLines = invoice.line_items
+    .filter((line) =>
+      line.source_type !== "accommodation" &&
+      !String(line.source_id || "").startsWith("meal-allocation:")
+    )
     .map((line) => line.toObject({ virtuals: false }));
 
   if (invoice.billing_type === "guest") {
@@ -181,7 +184,7 @@ async function synchronizeAutomaticDraftInvoice({
   invoice.currency = reservation.currency;
   invoice.line_items = [
     ...buildAccommodationLines(reservation),
-    ...nonAccommodationLines
+    ...manualLines
   ];
   invoice.updated_by = SYSTEM_ACTOR;
   await invoice.save({ session });

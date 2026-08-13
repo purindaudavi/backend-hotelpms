@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
 const Reservation = require("../db_models/booking.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
+const { MealAllocation } = require("../db_models/property.model");
 const {
   quoteRatePlan,
   parseDateOnly,
@@ -17,6 +18,7 @@ const RATE_PLAN_FIELDS = [
   "code",
   "currency",
   "meal_plan",
+  "meal_allocation_id",
   "valid_from",
   "valid_to",
   "refundable",
@@ -55,7 +57,9 @@ router.get("/", asyncHandler(async (req, res) => {
     query.$or = [{ name: expression }, { code: expression }, { meal_plan: expression }];
   }
 
-  const plans = await RatePlan.find(query).sort({ active: -1, name: 1 });
+  const plans = await RatePlan.find(query)
+    .populate("meal_allocation_id")
+    .sort({ active: -1, name: 1 });
   return res.status(200).json({
     count: plans.length,
     rate_plans: plans.map(serializeRatePlan)
@@ -69,6 +73,8 @@ router.post("/quote", asyncHandler(async (req, res) => {
     roomTypeId: req.body?.room_type_id,
     checkIn: req.body?.check_in,
     checkOut: req.body?.check_out,
+    adults: req.body?.adults,
+    children: req.body?.children,
     dayRoom: req.body?.day_room === true
   });
   return res.status(200).json({ quote });
@@ -79,7 +85,9 @@ router.post("/", asyncHandler(async (req, res) => {
   const plan = new RatePlan({ property_id: propertyId });
   applyRatePlanPayload(plan, req.body || {});
   await validateRoomTypeRates(propertyId, plan.room_type_rates);
+  await validateMealAllocationLink(propertyId, plan);
   await plan.save();
+  await plan.populate("meal_allocation_id");
 
   return res.status(201).json({
     message: "Rate plan created successfully.",
@@ -207,6 +215,7 @@ router.delete("/:ratePlanId/daily-rates/:dailyRateId", asyncHandler(async (req, 
 
 router.get("/:ratePlanId", asyncHandler(async (req, res) => {
   const plan = await requireRatePlan(req.params.ratePlanId, requirePropertyId(req));
+  await plan.populate("meal_allocation_id");
   return res.status(200).json({ rate_plan: serializeRatePlan(plan) });
 }));
 
@@ -224,7 +233,9 @@ router.patch("/:ratePlanId", asyncHandler(async (req, res) => {
 
   applyRatePlanPayload(plan, payload);
   await validateRoomTypeRates(propertyId, plan.room_type_rates);
+  await validateMealAllocationLink(propertyId, plan);
   await plan.save();
+  await plan.populate("meal_allocation_id");
   return res.status(200).json({
     message: "Rate plan updated successfully.",
     rate_plan: serializeRatePlan(plan)
@@ -354,6 +365,34 @@ async function validateRoomTypeRates(propertyId, roomTypeRates) {
   }
 }
 
+async function validateMealAllocationLink(propertyId, plan) {
+  if (plan.meal_plan === "Room Only") {
+    plan.meal_allocation_id = null;
+    return;
+  }
+  if (!plan.meal_allocation_id) {
+    throw httpError(
+      400,
+      `${plan.meal_plan} requires a meal allocation from Settings > Property > Meal Allocation.`
+    );
+  }
+  if (!mongoose.isValidObjectId(plan.meal_allocation_id)) {
+    throw httpError(400, "meal_allocation_id must be a valid MongoDB ObjectId.");
+  }
+  const allocation = await MealAllocation.findOne({
+    _id: plan.meal_allocation_id,
+    property_id: propertyId
+  });
+  if (!allocation) throw httpError(404, "Meal allocation not found for this property.");
+  if (!allocation.active) throw httpError(409, "The selected meal allocation is retired.");
+  if (allocation.meal_plan !== plan.meal_plan) {
+    throw httpError(409, "The meal allocation must match the rate plan meal plan.");
+  }
+  if (allocation.currency !== plan.currency) {
+    throw httpError(409, "The meal allocation and rate plan must use the same currency.");
+  }
+}
+
 async function validateDailyRateBatch(propertyId, plan, documents) {
   const combinations = documents.map((document) =>
     `${String(document.room_type_id)}::${dateKey(document.date)}`
@@ -403,12 +442,36 @@ function requireDateRange(fromValue, toValue) {
 }
 
 function serializeRatePlan(plan) {
+  const allocation = plan.meal_allocation_id;
   const result = plan.toObject({ virtuals: true });
+  if (allocation?._id) {
+    result.meal_allocation_id = allocation._id;
+    result.meal_allocation = serializeMealAllocation(allocation);
+  } else {
+    result.meal_allocation_id = allocation || null;
+    result.meal_allocation = null;
+  }
   result.valid_from = dateKey(plan.valid_from);
   result.valid_to = dateKey(plan.valid_to);
   result.version = plan.__v;
   delete result.__v;
   return result;
+}
+
+function serializeMealAllocation(allocation) {
+  return {
+    _id: allocation._id,
+    name: allocation.name,
+    meal_plan: allocation.meal_plan,
+    currency: allocation.currency,
+    adult_amounts: allocation.adult_amounts,
+    child_amounts: allocation.child_amounts,
+    valid_from: dateKey(allocation.valid_from),
+    valid_to: dateKey(allocation.valid_to),
+    active: allocation.active,
+    notes: allocation.notes,
+    version: allocation.version
+  };
 }
 
 function serializeDailyRate(dailyRate) {

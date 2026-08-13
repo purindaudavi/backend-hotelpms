@@ -25,6 +25,9 @@ const {
   prepareInvoicesForReservationCancellation,
   synchronizeAutomaticDraftInvoice
 } = require("../services/invoice-automation.service");
+const {
+  applyReservationMealAllocationSnapshots
+} = require("../services/meal-allocation.service");
 
 const router = express.Router();
 const attachmentBodyParser = express.raw({ type: "*/*", limit: "10mb" });
@@ -150,6 +153,11 @@ router.post("/reservations", asyncHandler(async (req, res) => {
       reservation.status = initialStatus;
     }
 
+    await applyReservationMealAllocationSnapshots({
+      reservation,
+      requireConfigured: true,
+      session
+    });
     await reservation.validate();
     await validateReservationInventory({
       propertyId,
@@ -300,6 +308,11 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
     const before = record.toObject({ virtuals: false });
     applyFields(record, req.body || {}, RESERVATION_EDIT_FIELDS);
     record.updated_by = actor;
+    await applyReservationMealAllocationSnapshots({
+      reservation: record,
+      requireConfigured: false,
+      session
+    });
     await record.validate();
     await validateReservationInventory({
       propertyId: record.property_id,
@@ -1206,6 +1219,11 @@ router.post("/business-blocks/:blockId/allocations/:allocationId/reservations", 
       updated_by: actor
     });
 
+    await applyReservationMealAllocationSnapshots({
+      reservation: record,
+      requireConfigured: true,
+      session
+    });
     await record.validate();
     await validateReservationInventory({
       propertyId,
