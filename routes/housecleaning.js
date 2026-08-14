@@ -117,6 +117,7 @@ router.post("/rooms/:physicalRoomId/start", asyncHandler(async (req, res) => {
     if (!["dirty", "clean"].includes(room.housekeeping_status)) {
       throw httpError(409, `Room ${room.room_number} cannot start cleaning from ${room.housekeeping_status}.`);
     }
+    await requireActiveAssignedAttendant(task, propertyId, session);
     const before = task.toObject();
     const previousRoomStatus = room.housekeeping_status;
     room.housekeeping_status = "in_progress";
@@ -144,6 +145,7 @@ router.post("/rooms/:physicalRoomId/complete", asyncHandler(async (req, res) => 
     if (room.housekeeping_status !== "in_progress") {
       throw httpError(409, `Room ${room.room_number} must be in progress before it can be completed.`);
     }
+    await requireActiveAssignedAttendant(task, propertyId, session);
     const before = task.toObject();
     room.housekeeping_status = "clean";
     task.status = "completed";
@@ -285,6 +287,25 @@ async function requireAttendant(id, propertyId, session = null) {
   if (session) query.session(session);
   const attendant = await query;
   if (!attendant) throw httpError(404, "Housekeeping attendant not found.");
+  return attendant;
+}
+
+async function requireActiveAssignedAttendant(task, propertyId, session = null) {
+  const attendantId = task.attendant?.attendant_id;
+  if (!attendantId || !mongoose.isValidObjectId(attendantId)) {
+    throw httpError(409, "Assign an active housekeeping attendant before starting or completing cleaning.");
+  }
+
+  const query = HousekeepingAttendant.findOne({
+    _id: attendantId,
+    property_id: propertyId,
+    status: "active"
+  });
+  if (session) query.session(session);
+  const attendant = await query;
+  if (!attendant) {
+    throw httpError(409, "The assigned housekeeping attendant is no longer active. Assign an active attendant first.");
+  }
   return attendant;
 }
 

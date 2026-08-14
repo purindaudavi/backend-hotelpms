@@ -16,6 +16,8 @@
   "main": "server.js",
   "scripts": {
     "test": "node --test",
+    "check:withdrawals": "node --check routes/withdrawals.js && node --check db_models/withdrawal.model.js",
+    "check:transactions": "node --check routes/transactions.js && node --check routes/purchases.js && node --check routes/expenses.js && node --check db_models/financial-transaction.model.js && node --check db_models/purchase.model.js && node --check db_models/expense.model.js && node --check services/financial-transaction.service.js",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "serve": "node server.js",

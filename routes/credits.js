@@ -9,6 +9,10 @@ const {
   refreshInvoiceBalances,
   serializeFinancialDocument
 } = require("../services/financial-document.service");
+const {
+  postFinancialTransaction,
+  voidFinancialTransaction
+} = require("../services/financial-transaction.service");
 
 const router = express.Router();
 const DRAFT_EDIT_FIELDS = ["credit_date", "reason_code", "reason", "line_items", "notes"];
@@ -188,6 +192,24 @@ router.post("/:creditNoteId/issue", asyncHandler(async (req, res) => {
     credit.issued_at = new Date();
     credit.updated_by = actor;
     await credit.save({ session });
+    await postFinancialTransaction({
+      propertyId: credit.property_id,
+      sourceType: "credit_note",
+      sourceId: credit._id,
+      sourceNumber: credit.credit_note_no,
+      transactionDate: credit.issued_at,
+      direction: "non_cash",
+      accountingEffect: "decrease",
+      amount: credit.total_credit,
+      currency: credit.currency,
+      reservationId: credit.reservation_id,
+      reservationNo: credit.reservation_no,
+      roomNumbers: invoice.stay_snapshot?.room_numbers || [],
+      description: `Credit note ${credit.credit_note_no} reduced invoice ${invoice.invoice_no}: ${credit.reason}`,
+      actor,
+      requestId: requestId(req),
+      session
+    });
     await refreshInvoiceBalances(invoice, session);
     await Promise.all([
       writeCreditLog({
@@ -239,6 +261,18 @@ router.post("/:creditNoteId/void", asyncHandler(async (req, res) => {
     credit.voided_at = new Date();
     credit.updated_by = actor;
     await credit.save({ session });
+    if (wasIssued) {
+      await voidFinancialTransaction({
+        propertyId: credit.property_id,
+        sourceType: "credit_note",
+        sourceId: credit._id,
+        reason,
+        actor,
+        requestId: requestId(req),
+        voidedAt: credit.voided_at,
+        session
+      });
+    }
     if (wasIssued) await refreshInvoiceBalances(invoice, session);
     await Promise.all([
       writeCreditLog({

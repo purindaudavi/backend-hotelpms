@@ -8,7 +8,15 @@ const { mealAllocationBreakdown } = require("./meal-allocation.service");
 
 async function nextDocumentNumber({ propertyId, documentType, date = new Date(), session }) {
   const year = new Date(date).getUTCFullYear();
-  const prefixes = { invoice: "INV", credit_note: "CN", refund: "RF" };
+  const prefixes = {
+    invoice: "INV",
+    credit_note: "CN",
+    refund: "RF",
+    withdrawal: "WD",
+    purchase: "PUR",
+    expense: "EXP",
+    financial_transaction: "TX"
+  };
   const prefix = prefixes[documentType];
   if (!prefix) throw new Error(`Unsupported financial document type: ${documentType}`);
   const filter = {

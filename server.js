@@ -15,6 +15,10 @@ const rateRoutes = require("./routes/rates");
 const invoiceRoutes = require("./routes/invoices");
 const creditRoutes = require("./routes/credits");
 const refundRoutes = require("./routes/refunds");
+const withdrawalRoutes = require("./routes/withdrawals");
+const transactionRoutes = require("./routes/transactions");
+const purchaseRoutes = require("./routes/purchases");
+const expenseRoutes = require("./routes/expenses");
 const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
 const propertyRoutes = require("./routes/property");
@@ -37,7 +41,7 @@ app.get("/api/health", (_req, res) => {
     database: databaseConnected ? "connected" : "disconnected"
   });
 });
-
+//auth,login,register,forgot password,reset password,logout
 app.use("/api", mailRoutes);
 app.use("/api/rooms", roomRoutes);
 app.use("/api/guests", guestRoutes);
@@ -49,6 +53,10 @@ app.use("/api/rates", rateRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/credits", creditRoutes);
 app.use("/api/refunds", refundRoutes);
+app.use("/api/withdrawals", withdrawalRoutes);
+app.use("/api/transactions", transactionRoutes);
+app.use("/api/purchases", purchaseRoutes);
+app.use("/api/expenses", expenseRoutes);
 app.use("/api/travel-agents", travelAgentRoutes);
 app.use("/api/housekeeping", housekeepingRoutes);
 app.use("/api/properties", propertyRoutes);

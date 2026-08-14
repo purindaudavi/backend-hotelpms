@@ -5,7 +5,7 @@ const DocumentCounterSchema = new mongoose.Schema(
     property_id: { type: String, required: true, trim: true, maxlength: 100 },
     document_type: {
       type: String,
-      enum: ["invoice", "credit_note", "refund"],
+      enum: ["invoice", "credit_note", "refund", "withdrawal", "purchase", "expense", "financial_transaction"],
       required: true
     },
     year: { type: Number, required: true, min: 2000, max: 9999 },

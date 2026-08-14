@@ -15,6 +15,10 @@ const {
   refreshReservationPaidTotal,
   serializeFinancialDocument
 } = require("../services/financial-document.service");
+const {
+  postFinancialTransaction,
+  voidFinancialTransaction
+} = require("../services/financial-transaction.service");
 
 const router = express.Router();
 
@@ -215,6 +219,24 @@ router.post("/:invoiceId/issue", asyncHandler(async (req, res) => {
     record.issued_at = new Date();
     record.updated_by = actor;
     await record.save({ session });
+    await postFinancialTransaction({
+      propertyId: record.property_id,
+      sourceType: "invoice",
+      sourceId: record._id,
+      sourceNumber: record.invoice_no,
+      transactionDate: record.issued_at,
+      direction: "non_cash",
+      accountingEffect: "increase",
+      amount: record.grand_total,
+      currency: record.currency,
+      reservationId: record.reservation_id,
+      reservationNo: record.reservation_no,
+      roomNumbers: record.stay_snapshot?.room_numbers || [],
+      description: `Invoice ${record.invoice_no} issued to ${record.billing_snapshot?.name || "guest"}.`,
+      actor,
+      requestId: requestId(req),
+      session
+    });
     await writeInvoiceLog({
       invoice: record,
       action: "invoice_issued",
@@ -253,6 +275,16 @@ router.post("/:invoiceId/void", asyncHandler(async (req, res) => {
     record.voided_at = new Date();
     record.updated_by = actor;
     await record.save({ session });
+    await voidFinancialTransaction({
+      propertyId: record.property_id,
+      sourceType: "invoice",
+      sourceId: record._id,
+      reason,
+      actor,
+      requestId: requestId(req),
+      voidedAt: record.voided_at,
+      session
+    });
     await writeInvoiceLog({
       invoice: record,
       action: "invoice_voided",
@@ -307,6 +339,24 @@ router.post("/:invoiceId/payments", asyncHandler(async (req, res) => {
       notes: req.body?.notes,
       posted_by: actor
     }], { session });
+    await postFinancialTransaction({
+      propertyId: invoice.property_id,
+      sourceType: "payment",
+      sourceId: payment._id,
+      sourceNumber: invoice.invoice_no,
+      transactionDate: payment.posted_at,
+      direction: "in",
+      accountingEffect: "increase",
+      amount: payment.amount,
+      currency: payment.currency,
+      reservationId: invoice.reservation_id,
+      reservationNo: invoice.reservation_no,
+      roomNumbers: invoice.stay_snapshot?.room_numbers || [],
+      description: `Payment received against invoice ${invoice.invoice_no}.`,
+      actor,
+      requestId: requestId(req),
+      session
+    });
     await refreshInvoiceBalances(invoice, session);
     await refreshReservationPaidTotal(invoice.reservation_id, invoice.property_id, session);
     await writeInvoiceLog({
@@ -351,6 +401,16 @@ router.post("/:invoiceId/payments/:paymentId/void", asyncHandler(async (req, res
     payment.voided_by = actor;
     payment.voided_at = new Date();
     await payment.save({ session });
+    await voidFinancialTransaction({
+      propertyId: invoice.property_id,
+      sourceType: "payment",
+      sourceId: payment._id,
+      reason,
+      actor,
+      requestId: requestId(req),
+      voidedAt: payment.voided_at,
+      session
+    });
     await refreshInvoiceBalances(invoice, session);
     await refreshReservationPaidTotal(invoice.reservation_id, invoice.property_id, session);
     await writeInvoiceLog({
@@ -391,6 +451,10 @@ function writeInvoiceLog({ invoice, action, description, actor, changes = [], re
     requestId: String(req.get("x-request-id") || "").trim(),
     session
   });
+}
+
+function requestId(req) {
+  return String(req.get("x-request-id") || "").trim();
 }
 
 function requirePropertyId(req) {

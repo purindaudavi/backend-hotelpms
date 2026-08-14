@@ -8,6 +8,9 @@ const {
   buildAccommodationLines,
   nextDocumentNumber
 } = require("./financial-document.service");
+const {
+  postFinancialTransaction
+} = require("./financial-transaction.service");
 
 const SYSTEM_ACTOR = Object.freeze({
   user_id: "system",
@@ -33,7 +36,7 @@ const INVOICE_STATUSES_REQUIRING_CORRECTION = new Set([
 ]);
 
 /**
- * Creates the initial draft invoice for a confirmed reservation.
+ * Creates and issues the initial invoice for a confirmed reservation.
  *
  * The lookup makes this operation idempotent: editing or retrying a confirmed
  * reservation will return its existing invoice instead of creating a duplicate.
@@ -68,6 +71,7 @@ async function ensureInvoiceForConfirmedReservation({
     session
   });
 
+  const issuedAt = new Date();
   const [invoice] = await Invoice.create([{
     property_id: reservation.property_id,
     invoice_no: invoiceNo,
@@ -95,20 +99,46 @@ async function ensureInvoiceForConfirmedReservation({
     due_date: invoiceDate,
     currency: reservation.currency,
     line_items: buildAccommodationLines(reservation),
-    status: "draft",
-    notes: `Automatically created when reservation ${reservation.reservation_no} was confirmed.`,
+    status: "issued",
+    notes: `Automatically created and issued when reservation ${reservation.reservation_no} was confirmed.`,
     created_by: SYSTEM_ACTOR,
-    updated_by: SYSTEM_ACTOR
+    updated_by: SYSTEM_ACTOR,
+    issued_by: SYSTEM_ACTOR,
+    issued_at: issuedAt
   }], { session });
+
+  if (invoice.grand_total > 0) {
+    await postFinancialTransaction({
+      propertyId: invoice.property_id,
+      sourceType: "invoice",
+      sourceId: invoice._id,
+      sourceNumber: invoice.invoice_no,
+      transactionDate: invoice.issued_at,
+      direction: "non_cash",
+      accountingEffect: "increase",
+      amount: invoice.grand_total,
+      currency: invoice.currency,
+      reservationId: invoice.reservation_id,
+      reservationNo: invoice.reservation_no,
+      roomNumbers: invoice.stay_snapshot?.room_numbers || [],
+      description:
+        `Invoice ${invoice.invoice_no} was automatically issued to ` +
+        `${invoice.billing_snapshot?.name || "guest"}.`,
+      actor: SYSTEM_ACTOR,
+      requestId,
+      session
+    });
+  }
 
   await writeAuditLog({
     propertyId: reservation.property_id,
     entityType: "invoice",
     entityId: invoice._id,
-    action: "invoice_created_automatically",
+    action: "invoice_created_and_issued_automatically",
     description:
-      `Draft invoice ${invoice.invoice_no} was automatically created for ` +
-      `reservation ${reservation.reservation_no}.`,
+      `Invoice ${invoice.invoice_no} was automatically created and issued for ` +
+      `reservation ${reservation.reservation_no} for ${invoice.currency} ` +
+      `${invoice.grand_total.toFixed(2)}.`,
     actor: SYSTEM_ACTOR,
     requestId,
     session
@@ -117,9 +147,9 @@ async function ensureInvoiceForConfirmedReservation({
     propertyId: reservation.property_id,
     entityType: "reservation",
     entityId: reservation._id,
-    action: "reservation_invoice_created",
+    action: "reservation_invoice_created_and_issued",
     description:
-      `System created draft invoice ${invoice.invoice_no} for reservation ` +
+      `System created and issued invoice ${invoice.invoice_no} for reservation ` +
       `${reservation.reservation_no}.`,
     actor: SYSTEM_ACTOR,
     requestId,
@@ -130,8 +160,9 @@ async function ensureInvoiceForConfirmedReservation({
 }
 
 /**
- * Keeps the system-created draft invoice aligned with an edited reservation.
- * Issued invoices and manually created drafts are intentionally left unchanged.
+ * Keeps historical system-created draft invoices aligned with an edited
+ * reservation. New automatic invoices are issued immediately, and issued
+ * invoices remain immutable accounting documents.
  */
 async function synchronizeAutomaticDraftInvoice({
   reservation,

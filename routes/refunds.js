@@ -4,6 +4,7 @@ const Refund = require("../db_models/refund.model");
 const Invoice = require("../db_models/invoice.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const BookingAuditLog = require("../db_models/booking-log.model");
+const FinancialTransaction = require("../db_models/financial-transaction.model");
 const { actorFromRequest, changesFromPayload, writeAuditLog } = require("../services/booking-audit.service");
 const {
   nextDocumentNumber,
@@ -223,6 +224,30 @@ router.post("/:refundId/complete", asyncHandler(async (req, res) => {
     refund.completed_by = actor;
     refund.updated_by = actor;
     await refund.save({ session });
+    const transactionNo = await nextDocumentNumber({
+      propertyId: refund.property_id,
+      documentType: "financial_transaction",
+      date: refund.completed_at,
+      session
+    });
+    const [financialTransaction] = await FinancialTransaction.create([{
+      property_id: refund.property_id,
+      transaction_no: transactionNo,
+      transaction_date: refund.completed_at,
+      source_type: "refund",
+      source_id: refund._id,
+      source_number: refund.refund_no,
+      direction: "out",
+      accounting_effect: "decrease",
+      amount: refund.amount,
+      currency: refund.currency,
+      reservation_id: refund.reservation_id,
+      reservation_no: refund.reservation_no,
+      room_numbers: invoice.stay_snapshot?.room_numbers || [],
+      description: `Refund ${refund.refund_no} for invoice ${refund.invoice_no}: ${refund.reason}`,
+      status: "posted",
+      created_by: actor
+    }], { session });
     await refreshInvoiceBalances(invoice, session);
     await refreshReservationPaidTotal(invoice.reservation_id, invoice.property_id, session);
     await Promise.all([
@@ -237,16 +262,23 @@ router.post("/:refundId/complete", asyncHandler(async (req, res) => {
         action: "invoice_refund_completed",
         description: `Refund ${refund.refund_no} was completed against invoice ${invoice.invoice_no}.`,
         actor, req, session
+      }),
+      writeFinancialTransactionLog({
+        transaction: financialTransaction,
+        action: "financial_transaction_posted",
+        description: `Money Out transaction ${financialTransaction.transaction_no} was posted for refund ${refund.refund_no}.`,
+        actor, req, session
       })
     ]);
-    return { refund, invoice, payment };
+    return { refund, invoice, payment, financialTransaction };
   });
 
   return res.status(200).json({
     message: `Refund ${result.refund.refund_no} completed successfully.`,
     refund: serializeFinancialDocument(result.refund),
     invoice: serializeFinancialDocument(result.invoice),
-    payment: result.payment
+    payment: result.payment,
+    financial_transaction: serializeFinancialDocument(result.financialTransaction)
   });
 }));
 
@@ -271,7 +303,20 @@ router.post("/:refundId/void", asyncHandler(async (req, res) => {
     refund.voided_by = actor;
     refund.updated_by = actor;
     await refund.save({ session });
+    let financialTransaction = null;
     if (wasCompleted) {
+      financialTransaction = await FinancialTransaction.findOne({
+        property_id: refund.property_id,
+        source_type: "refund",
+        source_id: refund._id
+      }).session(session);
+      if (financialTransaction && financialTransaction.status !== "voided") {
+        financialTransaction.status = "voided";
+        financialTransaction.voided_at = refund.voided_at;
+        financialTransaction.voided_by = actor;
+        financialTransaction.void_reason = reason;
+        await financialTransaction.save({ session });
+      }
       await refreshInvoiceBalances(invoice, session);
       await refreshReservationPaidTotal(invoice.reservation_id, invoice.property_id, session);
     }
@@ -287,15 +332,26 @@ router.post("/:refundId/void", asyncHandler(async (req, res) => {
         action: "invoice_refund_voided",
         description: `Refund ${refund.refund_no} was voided for invoice ${invoice.invoice_no}.`,
         actor, req, session
-      })
+      }),
+      financialTransaction
+        ? writeFinancialTransactionLog({
+          transaction: financialTransaction,
+          action: "financial_transaction_voided",
+          description: `Money Out transaction ${financialTransaction.transaction_no} was voided with refund ${refund.refund_no}.`,
+          actor, req, session
+        })
+        : Promise.resolve()
     ]);
-    return { refund, invoice };
+    return { refund, invoice, financialTransaction };
   });
 
   return res.status(200).json({
     message: `Refund ${result.refund.refund_no} voided successfully.`,
     refund: serializeFinancialDocument(result.refund),
-    invoice: serializeFinancialDocument(result.invoice)
+    invoice: serializeFinancialDocument(result.invoice),
+    financial_transaction: result.financialTransaction
+      ? serializeFinancialDocument(result.financialTransaction)
+      : null
   });
 }));
 
@@ -363,6 +419,19 @@ function writeInvoiceLog({ invoice, action, description, actor, req, session }) 
     propertyId: invoice.property_id,
     entityType: "invoice",
     entityId: invoice._id,
+    action,
+    description,
+    actor,
+    requestId: requestId(req),
+    session
+  });
+}
+
+function writeFinancialTransactionLog({ transaction, action, description, actor, req, session }) {
+  return writeAuditLog({
+    propertyId: transaction.property_id,
+    entityType: "financial_transaction",
+    entityId: transaction._id,
     action,
     description,
     actor,

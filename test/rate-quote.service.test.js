@@ -45,6 +45,7 @@ function installModelStubs({ overrides = [], planOverrides = {} } = {}) {
     included_children: 0,
     extra_adult_rate: 2000,
     extra_child_rate: 1000,
+    base_rate: 6500,
     active: true
   });
   DailyRate.find = () => ({ sort: async () => overrides });
@@ -135,6 +136,29 @@ test("rejects occupancy above the room type capacity", async () => {
         children: 0
       }),
       (error) => error.statusCode === 409 && error.code === "ADULT_CAPACITY_EXCEEDED"
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("rejects a missing rate-plan price instead of using the room default rate", async () => {
+  const restore = installModelStubs({
+    planOverrides: { room_type_rates: [] }
+  });
+  try {
+    await assert.rejects(
+      quoteRatePlan({
+        propertyId,
+        ratePlanId,
+        roomTypeId,
+        checkIn: "2026-08-01",
+        checkOut: "2026-08-02"
+      }),
+      (error) =>
+        error.statusCode === 409 &&
+        error.code === "RATE_NOT_CONFIGURED" &&
+        !error.message.includes("6500")
     );
   } finally {
     restore();

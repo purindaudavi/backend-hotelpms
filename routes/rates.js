@@ -66,6 +66,29 @@ router.get("/", asyncHandler(async (req, res) => {
   });
 }));
 
+router.get("/default-suggestions", asyncHandler(async (req, res) => {
+  const propertyId = requirePropertyId(req);
+  const roomTypes = await RoomType.find({
+    property_id: propertyId,
+    active: true
+  })
+    .select("_id name base_rate currency")
+    .sort({ name: 1 })
+    .lean();
+
+  return res.status(200).json({
+    message: "These values are suggestions for configuring a rate plan. They are not booking prices.",
+    count: roomTypes.length,
+    suggestions: roomTypes.map((roomType) => ({
+      room_type_id: roomType._id,
+      room_type_name: roomType.name,
+      suggested_amount: roomType.base_rate,
+      currency: roomType.currency,
+      source: "room_type_default"
+    }))
+  });
+}));
+
 router.post("/quote", asyncHandler(async (req, res) => {
   const quote = await quoteRatePlan({
     propertyId: requirePropertyId(req),
@@ -84,7 +107,9 @@ router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const plan = new RatePlan({ property_id: propertyId });
   applyRatePlanPayload(plan, req.body || {});
-  await validateRoomTypeRates(propertyId, plan.room_type_rates);
+  await validateRoomTypeRates(propertyId, plan.room_type_rates, {
+    requireEveryActiveRoomType: plan.active
+  });
   await validateMealAllocationLink(propertyId, plan);
   await plan.save();
   await plan.populate("meal_allocation_id");
@@ -232,7 +257,9 @@ router.patch("/:ratePlanId", asyncHandler(async (req, res) => {
   }
 
   applyRatePlanPayload(plan, payload);
-  await validateRoomTypeRates(propertyId, plan.room_type_rates);
+  await validateRoomTypeRates(propertyId, plan.room_type_rates, {
+    requireEveryActiveRoomType: plan.active
+  });
   await validateMealAllocationLink(propertyId, plan);
   await plan.save();
   await plan.populate("meal_allocation_id");
@@ -349,8 +376,14 @@ function applyDailyRatePayload(dailyRate, payload) {
   });
 }
 
-async function validateRoomTypeRates(propertyId, roomTypeRates) {
-  if (!Array.isArray(roomTypeRates) || roomTypeRates.length === 0) return;
+async function validateRoomTypeRates(
+  propertyId,
+  roomTypeRates,
+  { requireEveryActiveRoomType = false } = {}
+) {
+  if (!Array.isArray(roomTypeRates)) {
+    throw httpError(400, "room_type_rates must be an array.");
+  }
   const ids = roomTypeRates.map((rate) => rate.room_type_id);
   if (ids.some((id) => !mongoose.isValidObjectId(id))) {
     throw httpError(400, "Every room_type_id must be a valid MongoDB ObjectId.");
@@ -362,6 +395,28 @@ async function validateRoomTypeRates(propertyId, roomTypeRates) {
   });
   if (count !== uniqueIds.length) {
     throw httpError(400, "Every room type must belong to the selected property.");
+  }
+
+  if (!requireEveryActiveRoomType) return;
+
+  const activeRoomTypes = await RoomType.find({
+    property_id: propertyId,
+    active: true
+  })
+    .select("_id name")
+    .lean();
+  const configuredIds = new Set(uniqueIds);
+  const missingRoomTypes = activeRoomTypes.filter(
+    (roomType) => !configuredIds.has(String(roomType._id))
+  );
+  if (missingRoomTypes.length > 0) {
+    throw httpError(
+      409,
+      `Add a saved rate-plan price for every active room type. Missing: ${missingRoomTypes
+        .map((roomType) => roomType.name)
+        .join(", ")}.`,
+      "RATE_PLAN_PRICES_INCOMPLETE"
+    );
   }
 }
 
