@@ -11,6 +11,14 @@ const PropertyInfoSchema = new mongoose.Schema(
       minlength: [2, "Hotel name must contain at least 2 characters."],
       maxlength: [180, "Hotel name cannot exceed 180 characters."]
     },
+    pms_name: {
+      type: String,
+      required: [true, "PMS display name is required."],
+      trim: true,
+      minlength: [2, "PMS display name must contain at least 2 characters."],
+      maxlength: [80, "PMS display name cannot exceed 80 characters."],
+      default: "StayPilot"
+    },
     hotel_type: {
       type: String,
       trim: true,
@@ -381,6 +389,7 @@ PropertySchema.pre("validate", function normalizeProperty() {
   this.property_id = String(this.property_id || "").trim();
   if (!this.info) return;
   this.info.hotel_name = collapseWhitespace(this.info.hotel_name);
+  this.info.pms_name = collapseWhitespace(this.info.pms_name);
   this.info.hotel_type = collapseWhitespace(this.info.hotel_type);
   this.info.city = collapseWhitespace(this.info.city);
   this.info.country_code = String(this.info.country_code || "").trim().toUpperCase();

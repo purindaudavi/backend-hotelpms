@@ -8,6 +8,7 @@ function validProperty(overrides = {}) {
     property_id: " demo ",
     info: {
       hotel_name: "  Ronaka   Airport Transit Hotel ",
+      pms_name: "  Ronaka   PMS ",
       hotel_type: " Hotel ",
       star_category: 3,
       address: "No. 09, Airport Junction, Seeduwa",
@@ -35,6 +36,7 @@ test("validates and normalizes property information", async () => {
 
   assert.equal(property.property_id, "demo");
   assert.equal(property.info.hotel_name, "Ronaka Airport Transit Hotel");
+  assert.equal(property.info.pms_name, "Ronaka PMS");
   assert.equal(property.info.city, "Katunayake");
   assert.equal(property.info.country_code, "LK");
   assert.equal(property.info.email, "hotel@example.com");

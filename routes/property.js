@@ -19,6 +19,7 @@ const MAX_GALLERY_IMAGES = 20;
 
 const PROPERTY_INFO_FIELDS = [
   "hotel_name",
+  "pms_name",
   "hotel_type",
   "hotel_guid",
   "star_category",
