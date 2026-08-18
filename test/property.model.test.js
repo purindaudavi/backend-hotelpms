@@ -79,6 +79,29 @@ test("rejects coordinates and star categories outside their valid ranges", async
   });
 });
 
+test("provides valid default property appearance colors", async () => {
+  const property = validProperty();
+  await property.validate();
+
+  assert.equal(property.theme.accent_color, "#3b82f6");
+  assert.equal(property.theme.reservation_status_colors.confirmed, "#10b981");
+  assert.equal(property.theme.reservation_status_colors.checked_in, "#06b6d4");
+});
+
+test("rejects property appearance colors outside #RRGGBB format", async () => {
+  const property = validProperty();
+  property.theme = {
+    accent_color: "blue",
+    reservation_status_colors: { confirmed: "#123" }
+  };
+
+  await assert.rejects(property.validate(), (error) => {
+    assert.ok(error.errors["theme.accent_color"]);
+    assert.ok(error.errors["theme.reservation_status_colors.confirmed"]);
+    return true;
+  });
+});
+
 test("requires the core property identity and contact fields", async () => {
   const property = new Property({
     property_id: "demo",

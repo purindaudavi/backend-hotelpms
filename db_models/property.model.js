@@ -187,6 +187,44 @@ const PropertyInfoSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const HEX_COLOR_PATTERN = /^#[0-9A-Fa-f]{6}$/;
+
+function themeColor(defaultColor) {
+  return {
+    type: String,
+    trim: true,
+    match: [HEX_COLOR_PATTERN, "Theme colors must use the #RRGGBB format."],
+    default: defaultColor
+  };
+}
+
+const ReservationStatusColorsSchema = new mongoose.Schema(
+  {
+    confirmed: themeColor("#10b981"),
+    tentative: themeColor("#f59e0b"),
+    checked_out: themeColor("#ef4444"),
+    checked_in: themeColor("#06b6d4"),
+    cancelled: themeColor("#6b7280"),
+    no_show: themeColor("#78716c"),
+    no_show_surcharge: themeColor("#57534e"),
+    blocked: themeColor("#a855f7"),
+    out_of_order: themeColor("#1f2937"),
+    invalid_card: themeColor("#be185d")
+  },
+  { _id: false }
+);
+
+const PropertyThemeSchema = new mongoose.Schema(
+  {
+    accent_color: themeColor("#3b82f6"),
+    reservation_status_colors: {
+      type: ReservationStatusColorsSchema,
+      default: () => ({})
+    }
+  },
+  { _id: false }
+);
+
 const PropertySchema = new mongoose.Schema(
   {
     property_id: {
@@ -206,6 +244,10 @@ const PropertySchema = new mongoose.Schema(
     info: {
       type: PropertyInfoSchema,
       required: [true, "Property information is required."]
+    },
+    theme: {
+      type: PropertyThemeSchema,
+      default: () => ({})
     },
     status: {
       type: String,
@@ -455,6 +497,8 @@ module.exports.PropertyImage = PropertyImage;
 module.exports.MealAllocation = MealAllocation;
 module.exports.PropertySchema = PropertySchema;
 module.exports.PropertyInfoSchema = PropertyInfoSchema;
+module.exports.PropertyThemeSchema = PropertyThemeSchema;
+module.exports.ReservationStatusColorsSchema = ReservationStatusColorsSchema;
 module.exports.PropertyImageSchema = PropertyImageSchema;
 module.exports.MealAllocationSchema = MealAllocationSchema;
 module.exports.MEAL_PLANS = MEAL_PLANS;

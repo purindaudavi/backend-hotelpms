@@ -60,6 +60,20 @@ const MEAL_ALLOCATION_FIELDS = [
   "notes"
 ];
 
+const PROPERTY_THEME_FIELDS = [
+  "accent_color",
+  "reservation_status_colors.confirmed",
+  "reservation_status_colors.tentative",
+  "reservation_status_colors.checked_out",
+  "reservation_status_colors.checked_in",
+  "reservation_status_colors.cancelled",
+  "reservation_status_colors.no_show",
+  "reservation_status_colors.no_show_surcharge",
+  "reservation_status_colors.blocked",
+  "reservation_status_colors.out_of_order",
+  "reservation_status_colors.invalid_card"
+];
+
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
@@ -212,6 +226,54 @@ router.delete("/:propertyId/meal-allocations/:allocationId", asyncHandler(async 
 router.get("/:propertyId", asyncHandler(async (req, res) => {
   const property = await requireProperty(req.params.propertyId);
   return res.status(200).json({ property: await serializeProperty(property) });
+}));
+
+router.get("/:propertyId/theme", asyncHandler(async (req, res) => {
+  const property = await requireProperty(req.params.propertyId);
+  return res.status(200).json({ theme: serializePropertyTheme(property.theme) });
+}));
+
+router.patch("/:propertyId/theme", asyncHandler(async (req, res) => {
+  const actor = actorFromRequest(req);
+  const property = await inTransaction(async (session) => {
+    const record = await requireProperty(req.params.propertyId, session);
+    if (
+      req.body?.version !== undefined &&
+      Number(req.body.version) !== record.version
+    ) {
+      throw httpError(409, "Property settings changed after this page was loaded. Refresh and try again.");
+    }
+
+    const before = record.toObject({ virtuals: false });
+    applyThemePayload(record.theme, req.body?.theme || req.body || {});
+    record.updated_by = actor;
+    await record.save({ session });
+    const after = record.toObject({ virtuals: false });
+    const changes = changesFromPayload(
+      before,
+      after,
+      PROPERTY_THEME_FIELDS.map((field) => `theme.${field}`)
+    );
+
+    await writeAuditLog({
+      propertyId: record.property_id,
+      entityType: "property",
+      entityId: record._id,
+      action: "property_theme_updated",
+      description: `Appearance colors for ${record.info.hotel_name} were updated.`,
+      actor,
+      changes,
+      requestId: requestId(req),
+      session
+    });
+    return record;
+  });
+
+  return res.status(200).json({
+    message: "Property appearance colors updated successfully.",
+    theme: serializePropertyTheme(property.theme),
+    version: property.version
+  });
 }));
 
 router.get("/:propertyId/images", asyncHandler(async (req, res) => {
@@ -504,6 +566,23 @@ function applyInfoPayload(info, payload) {
   }
 }
 
+function applyThemePayload(theme, payload) {
+  if (Object.prototype.hasOwnProperty.call(payload, "accent_color")) {
+    theme.accent_color = payload.accent_color;
+  }
+
+  const colors = payload.reservation_status_colors;
+  if (!colors || typeof colors !== "object" || Array.isArray(colors)) return;
+
+  for (const field of PROPERTY_THEME_FIELDS
+    .filter((value) => value.startsWith("reservation_status_colors."))
+    .map((value) => value.split(".")[1])) {
+    if (Object.prototype.hasOwnProperty.call(colors, field)) {
+      theme.reservation_status_colors[field] = colors[field];
+    }
+  }
+}
+
 function applyMealAllocationPayload(allocation, payload) {
   for (const field of ["name", "meal_plan", "currency", "valid_from", "valid_to", "active", "notes"]) {
     if (Object.prototype.hasOwnProperty.call(payload, field)) allocation[field] = payload[field];
@@ -575,6 +654,15 @@ async function serializeProperty(property) {
       physical_room_count: physicalRoomCount,
       room_type_count: roomTypes.length
     }
+  };
+}
+
+function serializePropertyTheme(theme) {
+  return {
+    accent_color: theme.accent_color,
+    reservation_status_colors: theme.reservation_status_colors.toObject
+      ? theme.reservation_status_colors.toObject()
+      : theme.reservation_status_colors
   };
 }
 
