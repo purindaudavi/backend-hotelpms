@@ -22,6 +22,7 @@ const expenseRoutes = require("./routes/expenses");
 const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
 const propertyRoutes = require("./routes/property");
+const otaSimulatorRoutes = require("./routes/ota-simulator");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -60,6 +61,16 @@ app.use("/api/expenses", expenseRoutes);
 app.use("/api/travel-agents", travelAgentRoutes);
 app.use("/api/housekeeping", housekeepingRoutes);
 app.use("/api/properties", propertyRoutes);
+app.use("/api/integrations/ota-simulator", otaSimulatorRoutes);
+
+app.use((error, _req, res, _next) => {
+  const status = Number(error?.statusCode || error?.status || 500);
+  if (status >= 500) console.error(error);
+  return res.status(status).json({
+    message: error?.message || "The request could not be completed.",
+    ...(error?.code && typeof error.code === "string" ? { code: error.code } : {})
+  });
+});
 
 async function startServer() {
   await connectDatabase();

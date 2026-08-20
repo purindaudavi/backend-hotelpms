@@ -238,6 +238,31 @@ const EmailDeliverySchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Identifies a reservation imported from an external booking channel. Keeping
+// this reference on the normal reservation document lets every downstream PMS
+// workflow (front desk, invoicing, housekeeping and reporting) treat OTA and
+// direct bookings in the same way.
+const ExternalChannelSchema = new mongoose.Schema(
+  {
+    provider: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      maxlength: 80
+    },
+    external_reservation_id: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 160
+    },
+    event_id: { type: String, trim: true, maxlength: 160, default: "" },
+    received_at: { type: Date, required: true, default: Date.now }
+  },
+  { _id: false }
+);
+
 const ReservationSchema = new mongoose.Schema(
   {
     property_id: {
@@ -271,6 +296,11 @@ const ReservationSchema = new mongoose.Schema(
       trim: true,
       maxlength: 100,
       default: "Direct"
+    },
+    external_channel: {
+      type: ExternalChannelSchema,
+      required: false,
+      default: undefined
     },
     tour_number: { type: String, trim: true, maxlength: 120, default: "" },
     group_name: { type: String, trim: true, maxlength: 150, default: "" },
@@ -367,6 +397,21 @@ ReservationSchema.index(
 ReservationSchema.index({ property_id: 1, status: 1, check_in: 1 });
 ReservationSchema.index({ property_id: 1, check_in: 1, check_out: 1, status: 1 });
 ReservationSchema.index({ property_id: 1, booking_reference: 1 });
+ReservationSchema.index(
+  {
+    property_id: 1,
+    "external_channel.provider": 1,
+    "external_channel.external_reservation_id": 1
+  },
+  {
+    unique: true,
+    name: "unique_external_reservation_per_provider",
+    partialFilterExpression: {
+      "external_channel.provider": { $type: "string" },
+      "external_channel.external_reservation_id": { $type: "string" }
+    }
+  }
+);
 ReservationSchema.index({ property_id: 1, "booker.email": 1 });
 ReservationSchema.index({ property_id: 1, "booker.phone": 1 });
 ReservationSchema.index({ property_id: 1, "travel_agent.travel_agent_id": 1 });
@@ -439,6 +484,19 @@ function normalizeReservation(reservation) {
     .toUpperCase();
   reservation.booking_reference = String(reservation.booking_reference || "").trim();
   reservation.booking_source = collapseWhitespace(reservation.booking_source);
+  if (reservation.external_channel) {
+    reservation.external_channel.provider = String(
+      reservation.external_channel.provider || ""
+    )
+      .trim()
+      .toLowerCase();
+    reservation.external_channel.external_reservation_id = String(
+      reservation.external_channel.external_reservation_id || ""
+    ).trim();
+    reservation.external_channel.event_id = String(
+      reservation.external_channel.event_id || ""
+    ).trim();
+  }
   reservation.tour_number = String(reservation.tour_number || "").trim();
   reservation.group_name = collapseWhitespace(reservation.group_name);
   reservation.currency = String(reservation.currency || "LKR").trim().toUpperCase();
