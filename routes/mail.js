@@ -64,6 +64,7 @@
 
 const express = require("express");
 const nodemailer = require("nodemailer");
+const { resolveEmailTemplate } = require("../services/email-template.service");
 
 const router = express.Router();
 
@@ -278,6 +279,44 @@ function createEmailTemplate({
     `;
 }
 
+function customTemplateVariables(req) {
+    const supplied = req.body?.template_variables && typeof req.body.template_variables === "object"
+        ? req.body.template_variables
+        : {};
+    return {
+        hotelName: "Ronaka Airport Transit Hotel",
+        hotelPhone: "+94 70 355 1340",
+        currency: "LKR",
+        ...supplied,
+        guestName: supplied.guestName ?? req.body?.name ?? "Guest",
+        guestEmail: supplied.guestEmail ?? req.body?.mail ?? "",
+        reservationNo: supplied.reservationNo ?? req.body?.reservation ?? "",
+        bookingSource: supplied.bookingSource ?? req.body?.bookingsource ?? req.body?.boookingsource ?? "Direct",
+        payment: supplied.payment ?? req.body?.payment ?? req.body?.balance ?? "",
+        checkInDate: supplied.checkInDate ?? req.body?.checkin ?? req.body?.originalcheckin ?? "",
+        checkOutDate: supplied.checkOutDate ?? req.body?.checkout ?? req.body?.originalcheckout ?? "",
+        nights: supplied.nights ?? req.body?.nights ?? req.body?.duration ?? "",
+        roomsCount: supplied.roomsCount ?? req.body?.rooms ?? "",
+        totalAmount: supplied.totalAmount ?? req.body?.total ?? req.body?.finaltotal ?? "",
+        specialRequests: supplied.specialRequests ?? req.body?.sperequest ?? req.body?.spereq ?? "None",
+        timeLocation: supplied.timeLocation ?? req.body?.timelocation ?? "",
+        wifiName: supplied.wifiName ?? req.body?.wifiname ?? "",
+        wifiPassword: supplied.wifiPassword ?? req.body?.wifipwd ?? "",
+        subject: supplied.subject ?? req.body?.subject ?? "Hotel Information",
+        message: supplied.message ?? req.body?.message ?? ""
+    };
+}
+
+async function selectedEmail(req, category, fallbackHtml, fallbackSubject) {
+    return resolveEmailTemplate({
+        propertyId: String(req.body?.property_id || req.get("x-property-id") || "").trim(),
+        category,
+        variables: customTemplateVariables(req),
+        fallbackHtml,
+        fallbackSubject
+    });
+}
+
 
 
 
@@ -294,7 +333,7 @@ router.post("/mail/confirmation", async (req, res) => {
         });
     }
 
-        const html = createEmailTemplate({
+        const defaultHtml = createEmailTemplate({
         title: "BOOKING CONFIRMATION",
         name,
         message:
@@ -337,14 +376,15 @@ router.post("/mail/confirmation", async (req, res) => {
         contactMessage:
             "We look forward to welcoming you! If you have any questions, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
     });
+    const email = await selectedEmail(req, "confirmation", defaultHtml, "Booking Confirmation");
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "Booking Confirmation",
+            subject: email.subject,
             text: `Dear ${name}, booking ${checkin}. Check-in: ${checkin}, check-out: ${checkout}, duration: ${duration}, rooms: ${rooms}, payment: ${payment}, total: LKR ${total}, special requests: ${sperequest}.`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
@@ -378,7 +418,7 @@ router.post("/mail/check-in", async (req, res) => {
         });
     }
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: "WELCOME - CHECK-IN",
         name,
         message: `Your reservation ${reservation} is ready for check-in.`,
@@ -397,15 +437,16 @@ router.post("/mail/check-in", async (req, res) => {
         contactTitle: "Welcome to Ronaka Airport Transit Hotel",
         contactMessage: "If you need assistance during your stay, contact our hotel at +94 70 355 1340."
     });
+    const email = await selectedEmail(req, "check-in", defaultHtml, "Check-in Information");
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "Check-in Information",
+            subject: email.subject,
             text: `Dear ${name}, reservation ${reservation} has been confirmed. Check-in: ${checkin}, Check-out: ${checkout}, 
             Nights: ${nights}, Rooms: ${rooms}, Special Requests: ${sperequest}, Time and Location: ${timelocation}.`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
@@ -439,7 +480,7 @@ router.post("/mail/check-out", async (req, res) => {
         });
     }
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: "THANK YOU FOR STAYING WITH US",
         name,
         message: `Check-out details for reservation ${reservation}.`,
@@ -455,15 +496,16 @@ router.post("/mail/check-out", async (req, res) => {
         contactTitle: "We hope to welcome you again",
         contactMessage: "If you have questions about your final bill, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
     });
+    const email = await selectedEmail(req, "check-out", defaultHtml, "Check-out Information");
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "Check-out Information",
+            subject: email.subject,
             text: `Dear ${name}, reservation ${reservation} has been confirmed. Check-in: ${checkin}, Check-out: ${checkout}, 
             Duration: ${duration}, Final Total: ${finaltotal}, Payment Method: ${payment}.`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
@@ -509,7 +551,7 @@ router.post("/mail/cancellation", async (req, res) => {
         });
     }
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: "BOOKING CANCELLED",
         name,
         message: `Reservation ${reservation} has been cancelled.`,
@@ -525,15 +567,16 @@ router.post("/mail/cancellation", async (req, res) => {
         contactTitle: "Need help with this cancellation?",
         contactMessage: "Contact Ronaka Airport Transit Hotel at +94 70 355 1340 if you have any questions."
     });
+    const email = await selectedEmail(req, "cancellation", defaultHtml, "Cancellation Information");
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "Cancellation Information",
+            subject: email.subject,
             text: `Dear ${name}, reservation ${reservation} has been cancelled. Check-in: ${originalcheckin}, Check-out: ${originalcheckout}, 
             Rooms: ${roomDetails}, Booking Source: ${bookingSource}, Payment Method: ${paymentDetails}.`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
@@ -567,7 +610,7 @@ router.post("/mail/remind", async (req, res) => {
         });
     }
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: "UPCOMING STAY REMINDER",
         name,
         message: `This is a friendly reminder about reservation ${reservation}.`,
@@ -584,15 +627,16 @@ router.post("/mail/remind", async (req, res) => {
         contactTitle: "We look forward to welcoming you",
         contactMessage: "For changes or questions, contact Ronaka Airport Transit Hotel at +94 70 355 1340."
     });
+    const email = await selectedEmail(req, "reminder", defaultHtml, "Reminder Information");
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: "Reminder Information",
+            subject: email.subject,
             text: `Dear ${name}, this is a reminder about your reservation ${reservation}. Check-in: ${checkin}, Check-out: ${checkout}, 
             Nights: ${nights}, Rooms: ${rooms}, Balance: ${balance}, Special Request: ${spereq}.`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
@@ -642,7 +686,7 @@ router.post("/mail/no-show", async (req, res) => {
     }
 
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: "WE MISSED YOU",
         name,
         message:
@@ -680,14 +724,15 @@ router.post("/mail/no-show", async (req, res) => {
         contactMessage:
             "If this is incorrect or you need help, contact our hotel at +94 70 355 1340."
     });
+    const email = await selectedEmail(req, "no-show", defaultHtml, `No-show Notice - ${reservation}`);
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject: `No-show Notice - ${reservation}`,
+            subject: email.subject,
 
-            html
+            html: email.html
         });
 
 
@@ -718,7 +763,7 @@ router.post("/mail/general", async (req, res) => {
         });
     }
 
-    const html = createEmailTemplate({
+    const defaultHtml = createEmailTemplate({
         title: subject,
         name,
         message,
@@ -727,14 +772,15 @@ router.post("/mail/general", async (req, res) => {
         contactTitle: "Kind regards",
         contactMessage: "Ronaka Airport Transit Hotel - +94 70 355 1340"
     });
+    const email = await selectedEmail(req, "general", defaultHtml, subject);
 
     try {
         const delivery = await sendHotelMail({
             from: process.env.MAIL_USER,
             to: mail,
-            subject,
+            subject: email.subject,
             text: `Dear ${name}, ${message}`,
-            html
+            html: email.html
         });
 
         return res.status(200).json({
