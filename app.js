@@ -23,6 +23,7 @@ const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
 const propertyRoutes = require("./routes/property");
 const otaSimulatorRoutes = require("./routes/ota-simulator");
+const nightAuditRoutes = require("./routes/night-audit");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -62,6 +63,7 @@ app.use("/api/travel-agents", travelAgentRoutes);
 app.use("/api/housekeeping", housekeepingRoutes);
 app.use("/api/properties", propertyRoutes);
 app.use("/api/integrations/ota-simulator", otaSimulatorRoutes);
+app.use("/api/night-audit", nightAuditRoutes);
 
 app.use((error, _req, res, _next) => {
   const status = Number(error?.statusCode || error?.status || 500);

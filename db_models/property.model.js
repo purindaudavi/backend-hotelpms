@@ -258,6 +258,11 @@ const PropertySchema = new mongoose.Schema(
       default: "active",
       index: true
     },
+    business_date: {
+      type: Date,
+      required: false,
+      index: true
+    },
     created_by: { type: ActorSchema, default: () => ({}) },
     updated_by: { type: ActorSchema, default: () => ({}) }
   },

@@ -11,7 +11,8 @@ const TRANSACTION_SOURCE_TYPES = [
   "withdrawal",
   "purchase",
   "supplier_payment",
-  "expense"
+  "expense",
+  "night_audit"
 ];
 const TRANSACTION_EFFECTS = ["increase", "decrease", "neutral"];
 

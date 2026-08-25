@@ -15,6 +15,7 @@
   "type": "commonjs",
   "main": "app.js",
   "scripts": {
+    "check:night-audit": "node --check routes/night-audit.js && node --check db_models/night-audit.model.js && node --check services/night-audit.service.js",
     "test": "node --test",
     "check:withdrawals": "node --check routes/withdrawals.js && node --check db_models/withdrawal.model.js",
     "check:transactions": "node --check routes/transactions.js && node --check routes/purchases.js && node --check routes/expenses.js && node --check db_models/financial-transaction.model.js && node --check db_models/purchase.model.js && node --check db_models/expense.model.js && node --check services/financial-transaction.service.js",
