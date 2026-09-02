@@ -25,6 +25,7 @@ const propertyRoutes = require("./routes/property");
 const otaSimulatorRoutes = require("./routes/ota-simulator");
 const nightAuditRoutes = require("./routes/night-audit");
 const emailTemplateRoutes = require("./routes/email-templates");
+const authRoutes = require("./routes/auth");
 
 const app = express();
 const port = Number(process.env.PORT) || 3500;
@@ -66,7 +67,7 @@ app.use("/api/properties", propertyRoutes);
 app.use("/api/integrations/ota-simulator", otaSimulatorRoutes);
 app.use("/api/night-audit", nightAuditRoutes);
 app.use("/api/email-templates", emailTemplateRoutes);
-
+app.use("/api/auth", authRoutes);
 app.use((error, _req, res, _next) => {
   const status = Number(error?.statusCode || error?.status || 500);
   if (status >= 500) console.error(error);
