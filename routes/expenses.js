@@ -12,6 +12,7 @@ router.get("/", asyncHandler(async (req, res) => {
   const query = { property_id: propertyId };
   const status = normalizeEnum(req.query.status);
   if (status && status !== "all") query.status = status;
+  applyDateRange(query, "expense_date", req.query.date_from, req.query.date_to);
   const search = String(req.query.search || "").trim();
   if (search) { const pattern = new RegExp(escapeRegExp(search), "i"); query.$or = [{ expense_no: pattern }, { expense_type: pattern }, { description: pattern }, { remark: pattern }]; }
   const expenses = await Expense.find(query).sort({ expense_date: -1, _id: -1 }).limit(200);
@@ -65,6 +66,15 @@ router.post("/:expenseId/void", asyncHandler(async (req, res) => {
 function requirePropertyId(req) { const id = String(req.query.property_id || req.get("x-property-id") || req.body?.property_id || "").trim(); if (!id) throw httpError(400, "property_id is required."); return id; }
 function objectId(value) { if (!mongoose.isValidObjectId(value)) throw httpError(400, "expenseId must be valid."); return new mongoose.Types.ObjectId(value); }
 function parseDate(value, field) { const date = new Date(String(value || "")); if (Number.isNaN(date.getTime())) throw httpError(400, `${field} must be a valid date.`); return date; }
+function endOfDay(value, field) { const date = parseDate(value, field); date.setUTCHours(23, 59, 59, 999); return date; }
+function applyDateRange(query, field, from, to) {
+  if (!from && !to) return;
+  const range = {};
+  if (from) range.$gte = parseDate(from, "date_from");
+  if (to) range.$lte = endOfDay(to, "date_to");
+  if (range.$gte && range.$lte && range.$gte > range.$lte) throw httpError(400, "date_from cannot be after date_to.");
+  query[field] = range;
+}
 function positiveMoney(value, field) { const amount = Math.round((Number(value) + Number.EPSILON) * 100) / 100; if (!Number.isFinite(amount) || amount <= 0) throw httpError(400, `${field} must be greater than zero.`); return amount; }
 function normalizeEnum(value) { return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_"); }
 function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }

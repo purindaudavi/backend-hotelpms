@@ -5,7 +5,7 @@ const OCCUPANCY_STATUSES = new Set(["confirmed", "checked_in", "checked_out"]);
 const ARRIVAL_STATUSES = new Set(["tentative", "confirmed", "checked_in"]);
 const DEPARTURE_STATUSES = new Set(["confirmed", "checked_in", "checked_out"]);
 
-async function getDashboardSummary({ propertyId, asOf, currency = "" }) {
+async function getDashboardSummary({ propertyId, asOf, currency = "", dateFrom, dateTo }) {
   const date = dateOnly(asOf || new Date(), "as_of");
   const [reservations, roomTypes] = await Promise.all([
     Reservation.find({ property_id: propertyId, deleted_at: { $exists: false } }).lean(),
@@ -15,19 +15,24 @@ async function getDashboardSummary({ propertyId, asOf, currency = "" }) {
   return buildDashboardSummary({
     propertyId,
     asOf: date,
+    dateFrom,
+    dateTo,
     currency: normalizeCurrency(currency) || inferCurrency(reservations, roomTypes),
     reservations,
     roomTypes
   });
 }
 
-function buildDashboardSummary({ propertyId = "", asOf, currency = "LKR", reservations = [], roomTypes = [] }) {
+function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, currency = "LKR", reservations = [], roomTypes = [] }) {
   const date = dateOnly(asOf || new Date(), "as_of");
   const selectedCurrency = normalizeCurrency(currency) || "LKR";
   const todayStart = date;
   const tomorrow = addDays(date, 1);
   const monthStart = startOfMonth(date);
   const nextMonthStart = addMonths(monthStart, 1);
+  const reportRange = reportingRange(dateFrom, dateTo, monthStart, nextMonthStart);
+  const reportStart = reportRange.start;
+  const reportEnd = reportRange.end;
   const activeRooms = roomTypes.flatMap((roomType) =>
     (roomType.physical_rooms || []).filter((room) => room.active !== false)
   );
@@ -41,8 +46,8 @@ function buildDashboardSummary({ propertyId = "", asOf, currency = "LKR", reserv
   const departures = reservations.filter((reservation) =>
     DEPARTURE_STATUSES.has(reservation.status) && sameDay(reservation.check_out, date)
   );
-  const currentMonthReservations = reservations.filter((reservation) =>
-    overlaps(reservation, monthStart, nextMonthStart)
+  const periodReservations = reservations.filter((reservation) =>
+    overlaps(reservation, reportStart, reportEnd)
   );
   const revenueReservations = reservations.filter((reservation) =>
     OCCUPANCY_STATUSES.has(reservation.status) &&
@@ -50,7 +55,9 @@ function buildDashboardSummary({ propertyId = "", asOf, currency = "LKR", reserv
     inRange(reservation.check_in, monthStart, nextMonthStart)
   );
 
-  const occupancyTrend = eachDay(addDays(date, -6), date).map((day) => {
+  const trendStart = dateFrom && dateTo ? reportStart : addDays(date, -6);
+  const trendEnd = dateFrom && dateTo ? addDays(reportEnd, -1) : date;
+  const occupancyTrend = eachDay(trendStart, trendEnd).map((day) => {
     const occupied = occupiedRoomCount(reservations, day);
     return {
       date: isoDate(day),
@@ -73,22 +80,28 @@ function buildDashboardSummary({ propertyId = "", asOf, currency = "LKR", reserv
   });
 
   const bookingSources = groupedRoomNights(
-    currentMonthReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
+    periodReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
     (reservation) => reservation.booking_source || "Unknown",
-    monthStart,
-    nextMonthStart
+    reportStart,
+    reportEnd
   );
   const countries = groupedRoomNights(
-    currentMonthReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
+    periodReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
     (reservation) => reservation.booker?.country || "Unknown",
-    monthStart,
-    nextMonthStart
+    reportStart,
+    reportEnd
   );
-  const monthlyRoomNights = monthSeries(date, 6).map((start) => {
-    const end = addMonths(start, 1);
+  const selectedMonths = [];
+  if (dateFrom && dateTo) {
+    for (let month = startOfMonth(reportStart); month < reportEnd; month = addMonths(month, 1)) selectedMonths.push(month);
+  }
+  const monthlyRoomNights = (selectedMonths.length ? selectedMonths : monthSeries(date, 6)).map((month) => {
+    const start = selectedMonths.length && reportStart > month ? reportStart : month;
+    const next = addMonths(month, 1);
+    const end = selectedMonths.length && reportEnd < next ? reportEnd : next;
     const matching = reservations.filter((reservation) => overlaps(reservation, start, end));
     return {
-      month: isoDate(start).slice(0, 7),
+      month: isoDate(month).slice(0, 7),
       room_nights: roomNightsForRange(matching, start, end, OCCUPANCY_STATUSES),
       cancelled: matching.filter((reservation) => reservation.status === "cancelled").length,
       no_show: matching.filter((reservation) => reservation.status === "no_show").length
@@ -122,34 +135,38 @@ function buildDashboardSummary({ propertyId = "", asOf, currency = "LKR", reserv
     return totals;
   }, { room_revenue: 0, tax: 0, extras: 0, discounts: 0 });
 
-  const demographics = groupCounts(currentMonthReservations, (reservation) => {
+  const demographics = groupCounts(periodReservations, (reservation) => {
     if (reservation.business_block_id || reservation.group_name) return "Group";
     if (reservation.travel_agent?.name) return "Travel Agent";
     return reservation.booking_source || "Direct";
   });
-  const agentReservations = currentMonthReservations.filter((reservation) => reservation.travel_agent?.name);
+  const agentReservations = periodReservations.filter((reservation) => reservation.travel_agent?.name);
   const agents = Array.from(groupBy(agentReservations, (reservation) => reservation.travel_agent.name).entries())
     .map(([label, items]) => ({
       label,
-      room_nights: roomNightsForRange(items, monthStart, nextMonthStart, OCCUPANCY_STATUSES),
+      room_nights: roomNightsForRange(items, reportStart, reportEnd, OCCUPANCY_STATUSES),
       cancelled: items.filter((item) => item.status === "cancelled").length,
       no_show: items.filter((item) => item.status === "no_show").length,
       new_bookings: items.length
     }))
     .sort((left, right) => right.room_nights - left.room_nights || left.label.localeCompare(right.label));
   const mealPlans = groupedRoomNights(
-    currentMonthReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
+    periodReservations.filter((reservation) => OCCUPANCY_STATUSES.has(reservation.status)),
     (reservation) => reservation.meal_plan || "No meal plan",
-    monthStart,
-    nextMonthStart
+    reportStart,
+    reportEnd
   );
 
   return {
     property_id: propertyId,
     as_of: isoDate(date),
-    period: { date_from: isoDate(monthStart), date_to: isoDate(addDays(nextMonthStart, -1)) },
+    period: { date_from: isoDate(reportStart), date_to: isoDate(addDays(reportEnd, -1)) },
     currency: selectedCurrency,
     generated_at: new Date().toISOString(),
+    room_statuses: ["available", "occupied", "out_of_order", "maintenance"].map((status) => ({
+      status,
+      count: activeRooms.filter((room) => room.operational_status === status).length
+    })),
     overview: {
       arrivals: arrivals.length,
       arrival_guests: guestCount(arrivals),
@@ -281,6 +298,17 @@ function normalizeCurrency(value) {
   const currency = String(value || "").trim().toUpperCase();
   if (currency && !/^[A-Z]{3}$/.test(currency)) throw httpError(400, "currency must be a three-letter code such as LKR or USD.");
   return currency;
+}
+
+function reportingRange(dateFrom, dateTo, defaultStart, defaultEnd) {
+  if (!dateFrom && !dateTo) return { start: defaultStart, end: defaultEnd };
+  if (!dateFrom || !dateTo) throw httpError(400, "date_from and date_to must be provided together.");
+  const start = dateOnly(dateFrom, "date_from");
+  const inclusiveEnd = dateOnly(dateTo, "date_to");
+  if (inclusiveEnd < start) throw httpError(400, "date_to must be on or after date_from.");
+  const end = addDays(inclusiveEnd, 1);
+  if (daysBetween(start, end) > 366) throw httpError(400, "Dashboard date ranges cannot exceed 366 days.");
+  return { start, end };
 }
 
 function monthSeries(date, count) {

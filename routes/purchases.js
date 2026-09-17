@@ -12,6 +12,13 @@ router.get("/", asyncHandler(async (req, res) => {
   const query = { property_id: propertyId };
   const status = normalizeEnum(req.query.status);
   if (status && status !== "all") query.status = status;
+  const dateField = normalizeEnum(req.query.date_field) || "purchase_date";
+  if (!["purchase_date", "due_date"].includes(dateField)) throw httpError(400, "date_field must be purchase_date or due_date.");
+  applyDateRange(query, dateField, req.query.date_from, req.query.date_to);
+  if (String(req.query.overdue_only || "").toLowerCase() === "true") {
+    query.status = "to_be_paid";
+    query.due_date = { $lt: req.query.as_of ? endOfDay(req.query.as_of, "as_of") : new Date() };
+  }
   const search = String(req.query.search || "").trim();
   if (search) {
     const pattern = new RegExp(escapeRegExp(search), "i");
@@ -123,6 +130,15 @@ function writeLog(record, action, description, actor, req, session) { return wri
 function requirePropertyId(req) { const id = String(req.query.property_id || req.get("x-property-id") || req.body?.property_id || "").trim(); if (!id) throw httpError(400, "property_id is required."); return id; }
 function objectId(value) { if (!mongoose.isValidObjectId(value)) throw httpError(400, "purchaseId must be valid."); return new mongoose.Types.ObjectId(value); }
 function parseDate(value, field) { const date = new Date(String(value || "")); if (Number.isNaN(date.getTime())) throw httpError(400, `${field} must be a valid date.`); return date; }
+function endOfDay(value, field) { const date = parseDate(value, field); date.setUTCHours(23, 59, 59, 999); return date; }
+function applyDateRange(query, field, from, to) {
+  if (!from && !to) return;
+  const range = {};
+  if (from) range.$gte = parseDate(from, "date_from");
+  if (to) range.$lte = endOfDay(to, "date_to");
+  if (range.$gte && range.$lte && range.$gte > range.$lte) throw httpError(400, "date_from cannot be after date_to.");
+  query[field] = range;
+}
 function positiveMoney(value, field) { const amount = Math.round((Number(value) + Number.EPSILON) * 100) / 100; if (!Number.isFinite(amount) || amount <= 0) throw httpError(400, `${field} must be greater than zero.`); return amount; }
 function normalizeEnum(value) { return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_"); }
 function escapeRegExp(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }

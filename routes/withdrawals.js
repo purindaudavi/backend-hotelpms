@@ -42,7 +42,8 @@ router.get("/", asyncHandler(async (req, res) => {
       .skip((page - 1) * limit).limit(limit),
     Withdrawal.countDocuments(query),
     Withdrawal.aggregate([
-      { $match: { property_id: propertyId, status: "completed" } },
+      { $match: query },
+      { $match: { status: "completed" } },
       { $group: { _id: "$currency", amount: { $sum: "$amount" }, count: { $sum: 1 } } },
       { $sort: { _id: 1 } }
     ])

@@ -31,6 +31,7 @@ const BookingAuditLogSchema = new mongoose.Schema(
         "financial_transaction",
         "purchase",
         "expense",
+        "financial_target",
         "travel_agent",
         "housekeeping_task",
         "night_audit",

@@ -22,7 +22,9 @@ router.get("/dashboard", asyncHandler(async (req, res) => {
   const dashboard = await getDashboardSummary({
     propertyId: requirePropertyId(req),
     asOf: req.query.as_of || new Date(),
-    currency: req.query.currency || ""
+    currency: req.query.currency || "",
+    dateFrom: req.query.date_from,
+    dateTo: req.query.date_to
   });
   return res.status(200).json({ dashboard });
 }));
