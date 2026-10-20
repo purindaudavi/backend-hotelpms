@@ -83,7 +83,7 @@ router.get("/:guestId", asyncHandler(async (req, res) => {
 }));
 
 router.get("/findbymail/:email", asyncHandler(async (req, res) => {
-  const query = { email: req.params.email };
+  const query = { email: req.params.email, property_id: getPropertyId(req) };
   const guest = await Guest.findOne(query);
   if (!guest) {
     return res.status(404).json({ message: "Guest profile not found." });

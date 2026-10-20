@@ -1,6 +1,8 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { validateRoomCatalogChange, assertManualOccupancy } = require("../services/room-integrity.service");
 
 const router = express.Router();
 const imageBodyParser = express.raw({
@@ -74,8 +76,6 @@ router.get("/physical-rooms", asyncHandler(async (req, res) => {
 
 router.post("/", asyncHandler(async (req, res) => {
   const payload = req.body || {};
-  const roomType = new RoomType();
-  applyRoomTypePayload(roomType, payload, { includePropertyId: true });
 
   if (
     Object.prototype.hasOwnProperty.call(payload, "physical_rooms") &&
@@ -90,11 +90,16 @@ router.post("/", asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "amenities must be an array." });
   }
 
-  if (Array.isArray(payload.physical_rooms)) {
-    roomType.physical_rooms = payload.physical_rooms.map(normalizePhysicalRoomPayload);
-  }
-
-  await roomType.save();
+  const roomType = await withInventoryTransaction(getPropertyId(req), async (session) => {
+    const roomType = new RoomType();
+    applyRoomTypePayload(roomType, payload, { includePropertyId: true });
+    if (Array.isArray(payload.physical_rooms)) {
+      roomType.physical_rooms = payload.physical_rooms.map(normalizePhysicalRoomPayload);
+    }
+    await validateRoomCatalogChange({ after: roomType, session });
+    await roomType.save({ session });
+    return roomType;
+  });
   return res.status(201).json({
     message: "Room type created successfully.",
     room_type: serializeRoomType(roomType, req)
@@ -113,11 +118,6 @@ router.get("/:roomTypeId", asyncHandler(async (req, res) => {
 }));
 
 router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
-  const roomType = await findRoomType(req);
-  if (!roomType) {
-    return res.status(404).json({ message: "Room type not found." });
-  }
-
   const payload = req.body || {};
   if (
     Object.prototype.hasOwnProperty.call(payload, "amenities") &&
@@ -126,8 +126,13 @@ router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "amenities must be an array." });
   }
 
-  applyRoomTypePayload(roomType, payload, { includePropertyId: false });
-  await roomType.save();
+  const roomType = await mutateRoomType(req, async (roomType, session) => {
+    const before = roomType.toObject();
+    applyRoomTypePayload(roomType, payload, { includePropertyId: false });
+    await validateRoomCatalogChange({ before, after: roomType, session });
+    await roomType.save({ session });
+    return roomType;
+  });
 
   return res.status(200).json({
     message: "Room type updated successfully.",
@@ -136,37 +141,27 @@ router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
 }));
 
 router.delete("/:roomTypeId", asyncHandler(async (req, res) => {
-  const roomType = await findRoomType(req);
-  if (!roomType) {
-    return res.status(404).json({ message: "Room type not found." });
-  }
-
-  const hasOccupiedRoom = roomType.physical_rooms.some(
-    (room) => room.operational_status === "occupied"
-  );
-  if (hasOccupiedRoom && req.query.force !== "true") {
-    return res.status(409).json({
-      message: "This room type contains occupied rooms. Check them out or use force=true."
-    });
-  }
-
+  const imageIds = await mutateRoomType(req, async (roomType, session) => {
+    await validateRoomCatalogChange({ before: roomType.toObject(), deleting: true, session });
+    const imageIds = roomType.images.map((image) => image.file_id);
+    await roomType.deleteOne({ session });
+    return imageIds;
+  });
+  // GridFS is external to the retryable inventory callback. Delete only after
+  // the catalog transaction commits, never during a transaction retry.
   const bucket = getImagesBucket();
-  await Promise.all(
-    roomType.images.map((image) => deleteGridFsFile(bucket, image.file_id))
-  );
-  await roomType.deleteOne();
+  await Promise.all(imageIds.map((fileId) => deleteGridFsFile(bucket, fileId)));
 
   return res.status(200).json({ message: "Room type deleted successfully." });
 }));
 
 router.post("/:roomTypeId/physical-rooms", asyncHandler(async (req, res) => {
-  const roomType = await findRoomType(req);
-  if (!roomType) {
-    return res.status(404).json({ message: "Room type not found." });
-  }
-
-  roomType.physical_rooms.push(normalizePhysicalRoomPayload(req.body || {}));
-  await roomType.save();
+  const roomType = await mutateRoomType(req, async (roomType, session) => {
+    roomType.physical_rooms.push(normalizePhysicalRoomPayload(req.body || {}));
+    assertManualOccupancy(null, roomType.physical_rooms[roomType.physical_rooms.length - 1]);
+    await roomType.save({ session });
+    return roomType;
+  });
   const physicalRoom = roomType.physical_rooms[roomType.physical_rooms.length - 1];
 
   return res.status(201).json({
@@ -176,18 +171,16 @@ router.post("/:roomTypeId/physical-rooms", asyncHandler(async (req, res) => {
 }));
 
 router.patch("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (req, res) => {
-  const roomType = await findRoomType(req);
-  if (!roomType) {
-    return res.status(404).json({ message: "Room type not found." });
-  }
-
+  const roomType = await mutateRoomType(req, async (roomType, session) => {
+    const physicalRoom = roomType.physical_rooms.id(req.params.physicalRoomId);
+    if (!physicalRoom) throw roomError(404, "Physical room not found.");
+    const before = roomType.toObject();
+    applyPhysicalRoomPayload(physicalRoom, req.body || {});
+    await validateRoomCatalogChange({ before, after: roomType, physicalRoomId: physicalRoom._id, session });
+    await roomType.save({ session });
+    return roomType;
+  });
   const physicalRoom = roomType.physical_rooms.id(req.params.physicalRoomId);
-  if (!physicalRoom) {
-    return res.status(404).json({ message: "Physical room not found." });
-  }
-
-  applyPhysicalRoomPayload(physicalRoom, req.body || {});
-  await roomType.save();
 
   return res.status(200).json({
     message: "Physical room updated successfully.",
@@ -196,23 +189,14 @@ router.patch("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (
 }));
 
 router.delete("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (req, res) => {
-  const roomType = await findRoomType(req);
-  if (!roomType) {
-    return res.status(404).json({ message: "Room type not found." });
-  }
-
-  const physicalRoom = roomType.physical_rooms.id(req.params.physicalRoomId);
-  if (!physicalRoom) {
-    return res.status(404).json({ message: "Physical room not found." });
-  }
-  if (physicalRoom.operational_status === "occupied" && req.query.force !== "true") {
-    return res.status(409).json({
-      message: "An occupied physical room cannot be deleted. Check it out or use force=true."
-    });
-  }
-
-  physicalRoom.deleteOne();
-  await roomType.save();
+  await mutateRoomType(req, async (roomType, session) => {
+    const physicalRoom = roomType.physical_rooms.id(req.params.physicalRoomId);
+    if (!physicalRoom) throw roomError(404, "Physical room not found.");
+    const before = roomType.toObject();
+    physicalRoom.deleteOne();
+    await validateRoomCatalogChange({ before, after: roomType, physicalRoomId: req.params.physicalRoomId, deleting: true, session });
+    await roomType.save({ session });
+  });
   return res.status(200).json({ message: "Physical room deleted successfully." });
 }));
 
@@ -386,6 +370,7 @@ router.use((error, _req, res, _next) => {
     });
   }
 
+  if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
   console.error(error);
   return res.status(500).json({ message: "The room request could not be completed." });
 });
@@ -405,12 +390,24 @@ function getPropertyId(req) {
   ).trim();
 }
 
-async function findRoomType(req) {
+async function mutateRoomType(req, work) {
+  return withInventoryTransaction(getPropertyId(req), async (session) => {
+    const roomType = await findRoomType(req, session);
+    if (!roomType) throw roomError(404, "Room type not found.");
+    return work(roomType, session);
+  });
+}
+
+function roomError(statusCode, message) {
+  return Object.assign(new Error(message), { statusCode });
+}
+
+async function findRoomType(req, session) {
   if (!mongoose.isValidObjectId(req.params.roomTypeId)) return null;
   const query = { _id: req.params.roomTypeId };
   const propertyId = getPropertyId(req);
   if (propertyId) query.property_id = propertyId;
-  return RoomType.findOne(query);
+  return RoomType.findOne(query).session(session || null);
 }
 
 function applyRoomTypePayload(roomType, payload, { includePropertyId }) {

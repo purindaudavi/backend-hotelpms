@@ -1,5 +1,9 @@
 require("dotenv").config();
 
+for (const name of ["JWT_SECRET", "JWT_SECRET_REFRESH"]) {
+  if (!process.env[name]) throw new Error(`${name} must be configured before starting the backend.`);
+}
+
 const cors = require("cors");
 const express = require("express");
 const mongoose = require("mongoose");
@@ -24,6 +28,10 @@ const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
 const propertyRoutes = require("./routes/property");
 const otaSimulatorRoutes = require("./routes/ota-simulator");
+const testChannelConnectionRoutes = require("./routes/test-channel-connection");
+const channelBookingRoutes = require("./routes/channel-bookings");
+const channelConnectionRequestRoutes = require("./routes/channel-connection-requests");
+const internalChannelRequestRoutes = require("./routes/internal-channel-requests");
 const nightAuditRoutes = require("./routes/night-audit");
 const emailTemplateRoutes = require("./routes/email-templates");
 const authRoutes = require("./routes/auth");
@@ -31,6 +39,7 @@ const notificationRoutes = require("./routes/notifications");
 const financialTargetRoutes = require("./routes/financial-targets");
 
 const app = express();
+const { authenticateWorkspace, requirePropertyAccess, requireDemoReadAccess, isPublicPropertyMedia } = require("./services/property-access.service");
 const port = Number(process.env.PORT) || 3500;
 const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
@@ -49,6 +58,18 @@ app.get("/api/health", (_req, res) => {
   });
 });
 //auth,login,register,forgot password,reset password,logout
+app.use("/api/auth", authRoutes);
+// Internal reviewers are authenticated separately from hotel-scoped API routes.
+// Public registration cannot create admin/developer accounts.
+app.use("/api/internal/channel-requests", authenticateWorkspace, internalChannelRequestRoutes);
+app.use("/api", (req, res, next) => {
+  if (isPublicPropertyMedia(req)) return next();
+  if (req.get("x-demo-workspace") === "1") return requireDemoReadAccess(req, res, next);
+  return authenticateWorkspace(req, res, (error) => {
+    if (error) return next(error);
+    return requirePropertyAccess(req, res, next);
+  });
+});
 app.use("/api", mailRoutes);
 app.use("/api/rooms", roomRoutes);
 app.use("/api/guests", guestRoutes);
@@ -69,9 +90,11 @@ app.use("/api/travel-agents", travelAgentRoutes);
 app.use("/api/housekeeping", housekeepingRoutes);
 app.use("/api/properties", propertyRoutes);
 app.use("/api/integrations/ota-simulator", otaSimulatorRoutes);
+app.use("/api/integrations/test-channel", testChannelConnectionRoutes);
+app.use("/api/channel-bookings", channelBookingRoutes);
+app.use("/api/channel-requests", channelConnectionRequestRoutes);
 app.use("/api/night-audit", nightAuditRoutes);
 app.use("/api/email-templates", emailTemplateRoutes);
-app.use("/api/auth", authRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/financial-targets", financialTargetRoutes);
 

@@ -7,16 +7,23 @@ const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
 const CrossBooking = require("../db_models/crossbooking.model");
 const { HousekeepingActivity } = require("../db_models/housecleaning.model");
+const { DAY_MS, inventoryDay, inventoryRange, reservationOverlapDateQuery, physicalAssignments } = require("./booking-inventory-dates.service");
 
 async function validateReservationInventory({
   propertyId,
   checkIn,
   checkOut,
+  isDayRoom = false,
   rooms,
   excludeReservationId,
   linkedBusinessBlockId,
   session
 }) {
+  const range = inventoryRange({ check_in: checkIn, check_out: checkOut, is_day_room: isDayRoom });
+  // Normalize only the availability search bounds. Never change the stored
+  // reservation dates or turn a day-use stay into an overnight stay.
+  checkIn = new Date(range.start);
+  checkOut = new Date(range.end);
   const roomTypeIds = uniqueIds(rooms.map((room) => room.room_type_id));
   const roomTypes = await RoomType.find({
     property_id: propertyId,
@@ -27,6 +34,11 @@ async function validateReservationInventory({
   if (roomTypes.length !== roomTypeIds.length) {
     throw conflict("One or more selected room types do not exist or are disabled.");
   }
+
+  const overlappingReservations = await Reservation.find(
+    overlapReservationQuery({ propertyId, checkIn, checkOut, excludeReservationId }),
+    { rooms: 1, room_moves: 1, reservation_no: 1, business_block_id: 1, check_in: 1, check_out: 1, is_day_room: 1 }
+  ).session(session || null);
 
   const roomTypeMap = new Map(roomTypes.map((roomType) => [String(roomType._id), roomType]));
   const requestedByType = new Map();
@@ -62,24 +74,24 @@ async function validateReservationInventory({
     if (!physicalRoom || !physicalRoom.active) {
       throw conflict(`The selected physical room for ${roomType.name} is unavailable.`);
     }
+    if (["out_of_order", "maintenance"].includes(physicalRoom.operational_status)) {
+      throw conflict(`Room ${physicalRoom.room_number} is ${physicalRoom.operational_status.replaceAll("_", " ")}. Select another room.`);
+    }
     room.room_number = physicalRoom.room_number;
+    if (assignedPhysicalRooms.has(String(physicalRoom._id))) {
+      throw conflict("The same physical room cannot be assigned twice.");
+    }
+    const assignmentStart = room.current_assignment_from ? Math.max(range.start, inventoryDay(room.current_assignment_from)) : range.start;
     assignedPhysicalRooms.set(
       String(physicalRoom._id),
-      physicalRoom.room_number
+      { room_number: physicalRoom.room_number, start: assignmentStart }
     );
 
-    const overlapQuery = overlapReservationQuery({
-      propertyId,
-      checkIn,
-      checkOut,
-      excludeReservationId
-    });
-    overlapQuery.rooms = {
-      $elemMatch: { physical_room_id: physicalRoom._id }
-    };
-    if (await Reservation.exists(overlapQuery).session(session || null)) {
+    if (overlappingReservations.some((reservation) => physicalAssignments(reservation).some((assignment) =>
+      String(assignment.physical_room_id) === String(physicalRoom._id) && assignment.start < range.end && assignment.end > assignmentStart
+    ))) {
       throw conflict(
-        `Physical room ${physicalRoom.room_number} is already assigned during these dates.`
+        `Room ${physicalRoom.room_number} is already booked for these dates. Refresh availability and try again.`
       );
     }
   }
@@ -89,41 +101,10 @@ async function validateReservationInventory({
     checkIn,
     checkOut,
     assignedPhysicalRooms,
+    overlappingReservations,
     excludeReservationId,
     session
   });
-
-  const overlappingReservations = await Reservation.find(
-    overlapReservationQuery({
-      propertyId,
-      checkIn,
-      checkOut,
-      excludeReservationId
-    }),
-    { rooms: 1, business_block_id: 1 }
-  ).session(session || null);
-
-  const usedByType = new Map();
-  const pickedByAllocation = new Map();
-  for (const reservation of overlappingReservations) {
-    for (const room of reservation.rooms) {
-      if (room.business_block_allocation_id) {
-        const allocationId = String(room.business_block_allocation_id);
-        pickedByAllocation.set(
-          allocationId,
-          (pickedByAllocation.get(allocationId) || 0) + 1
-        );
-      }
-      if (
-        linkedBusinessBlockId &&
-        String(reservation.business_block_id || "") === String(linkedBusinessBlockId)
-      ) {
-        continue;
-      }
-      const typeId = String(room.room_type_id);
-      usedByType.set(typeId, (usedByType.get(typeId) || 0) + 1);
-    }
-  }
 
   const blockQuery = {
     property_id: propertyId,
@@ -135,37 +116,78 @@ async function validateReservationInventory({
   if (linkedBusinessBlockId) blockQuery._id = { $ne: linkedBusinessBlockId };
 
   const activeBlocks = await BusinessBlock.find(blockQuery, {
-    allocations: 1
+    allocations: 1, check_in: 1, check_out: 1
   }).session(session || null);
-  const heldByType = new Map();
-  for (const block of activeBlocks) {
-    for (const allocation of block.allocations) {
-      const picked = pickedByAllocation.get(String(allocation._id)) || 0;
-      const remainingHold = Math.max(
-        allocation.quantity - allocation.released_quantity - picked,
-        0
-      );
-      const typeId = String(allocation.room_type_id);
-      heldByType.set(typeId, (heldByType.get(typeId) || 0) + remainingHold);
-    }
-  }
 
-  for (const [typeId, requested] of requestedByType) {
+  const sellableByType = new Map();
+  for (const typeId of requestedByType.keys()) {
     const roomType = roomTypeMap.get(typeId);
-    const physicalCount = roomType.physical_rooms.filter(
+    sellableByType.set(typeId, roomType.physical_rooms.filter(
       (room) =>
         room.active &&
         !["out_of_order", "maintenance"].includes(room.operational_status)
-    ).length;
-    const used = usedByType.get(typeId) || 0;
-    const held = heldByType.get(typeId) || 0;
-    const available = Math.max(physicalCount - used - held, 0);
-    if (requested > available) {
-      throw conflict(
-        `${roomType.name} has only ${available} sellable room(s) available for these dates.`
+    ).length);
+  }
+
+  // Fetch once above, then count independently per night: two consecutive
+  // one-night bookings must not consume two rooms on both nights. A day-use
+  // request checks one calendar day through these same capacity calculations.
+  for (let night = range.start; night < range.end; night += DAY_MS) {
+    const usedByType = new Map();
+    const pickedByAllocation = new Map();
+    for (const reservation of overlappingReservations) {
+      if (!occupiesInventoryDay(reservation, night)) continue;
+      for (const room of reservation.rooms) {
+        if (room.business_block_allocation_id) {
+          const allocationId = String(room.business_block_allocation_id);
+          pickedByAllocation.set(
+            allocationId,
+            (pickedByAllocation.get(allocationId) || 0) + 1
+          );
+        }
+        if (
+          linkedBusinessBlockId &&
+          String(reservation.business_block_id || "") === String(linkedBusinessBlockId)
+        ) {
+          continue;
+        }
+        const typeId = String(room.room_type_id);
+        usedByType.set(typeId, (usedByType.get(typeId) || 0) + 1);
+      }
+    }
+
+    const heldByType = new Map();
+    for (const block of activeBlocks) {
+      if (!occupiesInventoryDay(block, night)) continue;
+      for (const allocation of block.allocations) {
+        const picked = pickedByAllocation.get(String(allocation._id)) || 0;
+        const remainingHold = Math.max(
+          allocation.quantity - allocation.released_quantity - picked,
+          0
+        );
+        const typeId = String(allocation.room_type_id);
+        heldByType.set(typeId, (heldByType.get(typeId) || 0) + remainingHold);
+      }
+    }
+
+    for (const [typeId, requested] of requestedByType) {
+      const available = Math.max(
+        sellableByType.get(typeId) - (usedByType.get(typeId) || 0) - (heldByType.get(typeId) || 0),
+        0
       );
+      if (requested > available) {
+        const roomType = roomTypeMap.get(typeId);
+        throw conflict(
+          `${roomType.name} has only ${available} sellable room(s) available on ${new Date(night).toISOString().slice(0, 10)}. Refresh availability and try again.`
+        );
+      }
     }
   }
+}
+
+function occupiesInventoryDay(record, night) {
+  const { start, end } = inventoryRange(record);
+  return start <= night && night < end;
 }
 
 async function validateCrossBookingConflicts({
@@ -173,6 +195,7 @@ async function validateCrossBookingConflicts({
   checkIn,
   checkOut,
   assignedPhysicalRooms,
+  overlappingReservations,
   excludeReservationId,
   session
 }) {
@@ -210,28 +233,18 @@ async function validateCrossBookingConflicts({
   });
   if (!linkedIds.size) return;
 
-  const overlapQuery = overlapReservationQuery({
-    propertyId,
-    checkIn,
-    checkOut,
-    excludeReservationId
+  const range = inventoryRange({ check_in: checkIn, check_out: checkOut });
+  const hasLinkedConflict = (assignment) => assignment.start < range.end && links.some((link) => {
+    const a = String(link.room_a_id);
+    const b = String(link.room_b_id);
+    const id = String(assignment.physical_room_id);
+    const selected = id === a ? assignedPhysicalRooms.get(b) : id === b ? assignedPhysicalRooms.get(a) : null;
+    return selected && assignment.end > selected.start;
   });
-  overlapQuery.rooms = {
-    $elemMatch: {
-      physical_room_id: {
-        $in: [...linkedIds].map((id) => new mongoose.Types.ObjectId(id))
-      }
-    }
-  };
-  const conflictingReservation = await Reservation.findOne(
-    overlapQuery,
-    { reservation_no: 1, rooms: 1 }
-  ).session(session || null);
+  const conflictingReservation = overlappingReservations.find((reservation) => physicalAssignments(reservation).some(hasLinkedConflict));
   if (!conflictingReservation) return;
 
-  const conflictingRoom = conflictingReservation.rooms.find((room) =>
-    linkedIds.has(String(room.physical_room_id || ""))
-  );
+  const conflictingRoom = physicalAssignments(conflictingReservation).find(hasLinkedConflict);
   const conflictingRoomId = String(conflictingRoom?.physical_room_id || "");
   const link = links.find((candidate) => {
     const roomAId = String(candidate.room_a_id);
@@ -253,7 +266,7 @@ async function validateCrossBookingConflicts({
     "linked room";
 
   throw conflict(
-    `Physical room ${selectedRoomNumber} is unavailable because cross-booked room ${linkedRoomNumber} is assigned to reservation ${conflictingReservation.reservation_no}.`
+    `Room ${selectedRoomNumber} overlaps a booking in cross-booked room ${linkedRoomNumber} (${conflictingReservation.reservation_no}). Refresh availability and try again.`
   );
 }
 
@@ -400,8 +413,7 @@ function overlapReservationQuery({
     property_id: propertyId,
     status: { $in: ACTIVE_RESERVATION_STATUSES },
     deleted_at: { $exists: false },
-    check_in: { $lt: checkOut },
-    check_out: { $gt: checkIn }
+    ...reservationOverlapDateQuery(checkIn, checkOut)
   };
   if (excludeReservationId) query._id = { $ne: excludeReservationId };
   return query;

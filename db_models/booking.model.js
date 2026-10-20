@@ -123,6 +123,21 @@ const MealAllocationSnapshotSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const RoomMoveSchema = new mongoose.Schema({
+  room_line_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  room_type_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  room_type_name: { type: String, required: true },
+  from_physical_room_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  from_room_number: { type: String, required: true },
+  to_physical_room_id: { type: mongoose.Schema.Types.ObjectId, required: true },
+  to_room_number: { type: String, required: true },
+  previous_assigned_from: { type: Date, required: true },
+  business_date: { type: Date, required: true },
+  moved_at: { type: Date, required: true, default: Date.now },
+  actor: { type: ActorSchema, default: () => ({}) },
+  reason: { type: String, required: true, trim: true, maxlength: 500 }
+}, { _id: true });
+
 const ReservationRoomSchema = new mongoose.Schema(
   {
     room_type_id: {
@@ -141,6 +156,7 @@ const ReservationRoomSchema = new mongoose.Schema(
       required: false
     },
     room_number: { type: String, trim: true, maxlength: 30, default: "" },
+    current_assignment_from: { type: Date, required: false },
     occupancy: { type: String, trim: true, maxlength: 50, default: "" },
     bed_type: { type: String, trim: true, maxlength: 80, default: "" },
     adults: { type: Number, required: true, min: 1, max: 30, default: 1 },
@@ -343,6 +359,7 @@ const ReservationSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       required: false
     },
+    room_moves: { type: [RoomMoveSchema], default: [] },
     checked_in_at: { type: Date, required: false },
     checked_in_by: { type: ActorSchema, required: false },
     checked_out_at: { type: Date, required: false },

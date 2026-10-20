@@ -241,6 +241,8 @@ const PropertySchema = new mongoose.Schema(
       index: true,
       immutable: true
     },
+    owner_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
+    member_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     info: {
       type: PropertyInfoSchema,
       required: [true, "Property information is required."]

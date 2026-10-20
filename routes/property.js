@@ -11,6 +11,8 @@ const {
 } = require("../services/booking-audit.service");
 
 const router = express.Router();
+const User = require("../db_models/user.model");
+const { accessiblePropertiesQuery, propertyRole } = require("../services/property-access.service");
 const imageBodyParser = express.raw({
   type: ["image/jpeg", "image/png", "image/webp"],
   limit: "8mb"
@@ -74,6 +76,43 @@ const PROPERTY_THEME_FIELDS = [
   "reservation_status_colors.invalid_card"
 ];
 
+router.get("/", asyncHandler(async (req, res) => {
+  const records = await Property.find(accessiblePropertiesQuery(req.workspaceUser)).sort({ "info.hotel_name": 1 });
+  res.json({ properties: records.map((property) => ({
+    property_id: property.property_id,
+    hotel_name: property.info.hotel_name,
+    city: property.info.city,
+    country_code: property.info.country_code,
+    home_currency: property.info.home_currency,
+    role: propertyRole(property, req.workspaceUser)
+  })) });
+}));
+
+router.get("/:propertyId/access", asyncHandler(async (req, res) => {
+  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
+  const property = req.authorizedProperty;
+  const users = await User.find({ _id: { $in: [property.owner_id, ...property.member_ids].filter(Boolean) } }).select("name email").lean();
+  res.json({ members: users.map((user) => ({ id: String(user._id), name: user.name, email: user.email,
+    role: String(user._id) === String(property.owner_id) ? "owner" : "member" })) });
+}));
+
+router.post("/:propertyId/access", asyncHandler(async (req, res) => {
+  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const user = await User.findOne({ email });
+  if (!user) return res.status(404).json({ message: "No account uses that email. Ask the staff member to register first." });
+  await Property.updateOne({ _id: req.authorizedProperty._id }, { $addToSet: { member_ids: user._id } });
+  res.status(201).json({ message: "Property access granted." });
+}));
+
+router.delete("/:propertyId/access/:userId", asyncHandler(async (req, res) => {
+  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
+  if (!mongoose.isValidObjectId(req.params.userId)) throw httpError(400, "Invalid account ID.");
+  if (String(req.authorizedProperty.owner_id) === req.params.userId) throw httpError(400, "The property owner cannot be removed.");
+  await Property.updateOne({ _id: req.authorizedProperty._id }, { $pull: { member_ids: req.params.userId } });
+  res.json({ message: "Property access removed." });
+}));
+
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
@@ -83,6 +122,7 @@ router.post("/", asyncHandler(async (req, res) => {
 
     const record = new Property({
       property_id: propertyId,
+      owner_id: req.workspaceUser._id,
       info: {},
       status: req.body?.status,
       created_by: actor,

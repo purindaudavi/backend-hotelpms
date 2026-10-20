@@ -8,6 +8,9 @@ const ReservationAttachment = require("../db_models/reservation-attachment.model
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const Guest = require("../db_models/guest.model");
 const RoomType = require("../db_models/rooms.model");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { bookingValidationMessage } = require("../services/booking-validation-message.service");
+const { moveInHouseRooms, preserveAssignmentMetadata } = require("../services/room-move.service");
 const {
   actorFromRequest,
   changesFromPayload,
@@ -134,7 +137,7 @@ router.get("/reservations", asyncHandler(async (req, res) => {
 router.post("/reservations", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const reservation = new Reservation({
       property_id: propertyId,
       reservation_no: generateReference("RES"),
@@ -163,6 +166,7 @@ router.post("/reservations", asyncHandler(async (req, res) => {
       propertyId,
       checkIn: reservation.check_in,
       checkOut: reservation.check_out,
+      isDayRoom: reservation.is_day_room,
       rooms: reservation.rooms,
       linkedBusinessBlockId: reservation.business_block_id,
       session
@@ -239,7 +243,7 @@ router.patch("/reservations/:reservationId/email-delivery", asyncHandler(async (
   if (!category) throw badRequest("Email category is required.");
 
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
 
@@ -298,7 +302,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
   }
 
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     if (["checked_out", "cancelled", "no_show"].includes(record.status)) {
@@ -307,6 +311,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
 
     const before = record.toObject({ virtuals: false });
     applyFields(record, req.body || {}, RESERVATION_EDIT_FIELDS);
+    preserveAssignmentMetadata(before, record);
     record.updated_by = actor;
     await applyReservationMealAllocationSnapshots({
       reservation: record,
@@ -318,6 +323,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
       propertyId: record.property_id,
       checkIn: record.check_in,
       checkOut: record.check_out,
+      isDayRoom: record.is_day_room,
       rooms: record.rooms,
       excludeReservationId: record._id,
       linkedBusinessBlockId: record.business_block_id,
@@ -352,9 +358,19 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
   });
 }));
 
+router.post("/reservations/:reservationId/room-moves", asyncHandler(async (req, res) => {
+  const reservation = await inTransaction(req, async (session) => {
+    const record = await findReservation(req, session);
+    if (!record) throw notFound("Reservation not found.");
+    return moveInHouseRooms({ reservation: record, moves: req.body?.moves, businessDate: req.body?.business_date,
+      reason: req.body?.reason, actor: actorFromRequest(req), requestId: requestId(req), session });
+  });
+  return res.status(200).json({ message: "Room move saved. The previous room needs cleaning.", reservation: serializeReservation(reservation) });
+}));
+
 router.delete("/reservations/:reservationId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  await inTransaction(async (session) => {
+  await inTransaction(req, async (session) => {
     const reservation = await findReservation(req, session);
     if (!reservation) throw notFound("Reservation not found.");
     if (reservation.status === "checked_in") {
@@ -395,7 +411,7 @@ router.post("/reservations/:reservationId/confirm", asyncHandler(async (req, res
 router.post("/reservations/:reservationId/check-in", asyncHandler(async (req, res) => {
   const businessDate = dateOnly(req.body?.business_date || new Date());
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     if (record.status !== "confirmed") {
@@ -403,7 +419,7 @@ router.post("/reservations/:reservationId/check-in", asyncHandler(async (req, re
     }
     const checkIn = dateOnly(record.check_in);
     const checkOut = dateOnly(record.check_out);
-    if (businessDate < checkIn || (!record.is_day_room && businessDate >= checkOut)) {
+    if (record.is_day_room ? businessDate !== checkIn : businessDate < checkIn || businessDate >= checkOut) {
       throw conflict("The business date is outside this reservation's stay dates.");
     }
 
@@ -435,7 +451,7 @@ router.post("/reservations/:reservationId/check-in", asyncHandler(async (req, re
 
 router.post("/reservations/:reservationId/check-out", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     if (record.status !== "checked_in") {
@@ -522,7 +538,7 @@ router.post("/reservations/:reservationId/no-show", asyncHandler(async (req, res
 
 router.post("/reservations/:reservationId/occupants", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     record.occupants.push(req.body || {});
@@ -550,7 +566,7 @@ router.post("/reservations/:reservationId/occupants", asyncHandler(async (req, r
 
 router.patch("/reservations/:reservationId/occupants/:occupantId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     const occupant = record.occupants.id(req.params.occupantId);
@@ -589,7 +605,7 @@ router.patch("/reservations/:reservationId/occupants/:occupantId", asyncHandler(
 
 router.delete("/reservations/:reservationId/occupants/:occupantId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     const occupant = record.occupants.id(req.params.occupantId);
@@ -630,7 +646,7 @@ router.get("/reservations/:reservationId/payments", asyncHandler(async (req, res
 
 router.post("/reservations/:reservationId/payments", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const payment = await inTransaction(async (session) => {
+  const payment = await inTransaction(req, async (session) => {
     const reservation = await findReservation(req, session);
     if (!reservation) throw notFound("Reservation not found.");
     const status = normalizeEnum(req.body?.status) || "posted";
@@ -672,7 +688,7 @@ router.post("/reservations/:reservationId/payments/:paymentId/void", asyncHandle
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const payment = await inTransaction(async (session) => {
+  const payment = await inTransaction(req, async (session) => {
     const reservation = await findReservation(req, session);
     if (!reservation) throw notFound("Reservation not found.");
     const record = await ReservationPayment.findOne({
@@ -885,7 +901,7 @@ router.get("/business-blocks", asyncHandler(async (req, res) => {
 router.post("/business-blocks", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const block = await inTransaction(async (session) => {
+  const block = await inTransaction(req, async (session) => {
     const record = new BusinessBlock({
       property_id: propertyId,
       block_number: generateReference("BB"),
@@ -945,7 +961,7 @@ router.patch("/business-blocks/:blockId", asyncHandler(async (req, res) => {
     throw badRequest("Use a business-block lifecycle endpoint to change status.");
   }
   const actor = actorFromRequest(req);
-  const block = await inTransaction(async (session) => {
+  const block = await inTransaction(req, async (session) => {
     const record = await findBusinessBlock(req, session);
     if (!record) throw notFound("Business block not found.");
     if (["released", "cancelled", "completed"].includes(record.status)) {
@@ -988,7 +1004,7 @@ router.patch("/business-blocks/:blockId", asyncHandler(async (req, res) => {
 
 router.delete("/business-blocks/:blockId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  await inTransaction(async (session) => {
+  await inTransaction(req, async (session) => {
     const block = await findBusinessBlock(req, session);
     if (!block) throw notFound("Business block not found.");
     if (block.status === "active") {
@@ -1030,7 +1046,7 @@ router.post("/business-blocks/:blockId/activate", asyncHandler(async (req, res) 
 
 router.post("/business-blocks/:blockId/release", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const block = await inTransaction(async (session) => {
+  const block = await inTransaction(req, async (session) => {
     const record = await findBusinessBlock(req, session);
     if (!record) throw notFound("Business block not found.");
     if (record.status !== "active") {
@@ -1138,7 +1154,7 @@ router.delete("/business-blocks/:blockId/allocations/:allocationId", asyncHandle
 router.post("/business-blocks/:blockId/allocations/:allocationId/reservations", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(async (session) => {
+  const reservation = await inTransaction(req, async (session) => {
     const block = await findBusinessBlock(req, session);
     if (!block) throw notFound("Business block not found.");
     if (block.status !== "active") {
@@ -1229,6 +1245,7 @@ router.post("/business-blocks/:blockId/allocations/:allocationId/reservations", 
       propertyId,
       checkIn: record.check_in,
       checkOut: record.check_out,
+      isDayRoom: record.is_day_room,
       rooms: record.rooms,
       linkedBusinessBlockId: block._id,
       session
@@ -1308,7 +1325,7 @@ router.use((error, _req, res, _next) => {
     error.name === "BSONError"
   ) {
     return res.status(400).json({
-      message: "Booking data validation failed.",
+      message: bookingValidationMessage(error),
       errors: Object.values(error.errors || {}).map(
         (validationError) => validationError.message
       )
@@ -1330,7 +1347,7 @@ router.use((error, _req, res, _next) => {
 
 async function transitionReservation(req, options) {
   const actor = actorFromRequest(req);
-  return inTransaction(async (session) => {
+  return inTransaction(req, async (session) => {
     const reservation = await findReservation(req, session);
     if (!reservation) throw notFound("Reservation not found.");
     if (!options.from.includes(reservation.status)) {
@@ -1374,7 +1391,7 @@ async function transitionReservation(req, options) {
 
 async function transitionBusinessBlock(req, options) {
   const actor = actorFromRequest(req);
-  return inTransaction(async (session) => {
+  return inTransaction(req, async (session) => {
     const block = await findBusinessBlock(req, session);
     if (!block) throw notFound("Business block not found.");
     if (!options.from.includes(block.status)) {
@@ -1408,7 +1425,7 @@ async function transitionBusinessBlock(req, options) {
 
 async function mutateAllocation(req, operation) {
   const actor = actorFromRequest(req);
-  return inTransaction(async (session) => {
+  return inTransaction(req, async (session) => {
     const block = await findBusinessBlock(req, session);
     if (!block) throw notFound("Business block not found.");
     if (block.status !== "tentative") {
@@ -1665,7 +1682,13 @@ function getPropertyId(req) {
 function applyFields(target, payload, fields) {
   for (const field of fields) {
     if (Object.prototype.hasOwnProperty.call(payload, field)) {
-      target[field] = payload[field];
+      if (field === "rooms" && Array.isArray(payload[field])) {
+        target[field] = payload[field].map((room) => {
+          const clean = { ...room };
+          delete clean.current_assignment_from;
+          return clean;
+        });
+      } else target[field] = payload[field];
     }
   }
 }
@@ -1680,17 +1703,8 @@ function generateReference(prefix) {
   return `${prefix}-${datePart}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
 }
 
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => {
-      result = await work(session);
-    });
-    return result;
-  } finally {
-    await session.endSession();
-  }
+function inTransaction(req, work) {
+  return withInventoryTransaction(requirePropertyId(req), work);
 }
 
 function getAttachmentBucket() {

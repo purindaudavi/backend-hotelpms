@@ -1,6 +1,7 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const BookingAuditLog = require("../db_models/booking-log.model");
 const {
   HousekeepingTask,
@@ -190,6 +191,7 @@ router.post("/rooms/:physicalRoomId/inspect", asyncHandler(async (req, res) => {
 }));
 
 router.use((error, _req, res, _next) => {
+  if (error.statusCode) return res.status(error.statusCode).json({ message: error.message });
   if (error.status) return res.status(error.status).json({ message: error.message });
   if (error.code === 11000) return res.status(409).json({ message: "That housekeeping record already exists." });
   if (error instanceof mongoose.Error.ValidationError || error instanceof mongoose.Error.CastError) {
@@ -206,7 +208,7 @@ router.use((error, _req, res, _next) => {
 });
 
 async function mutateRoomTask(req, propertyId, mutation) {
-  return inTransaction(async (session) => {
+  return withInventoryTransaction(propertyId, async (session) => {
     const { roomType, room } = await requirePhysicalRoom(req.params.physicalRoomId, propertyId, session);
     let task = await HousekeepingTask.findOne({ property_id: propertyId, physical_room_id: room._id }).session(session);
     if (!task) {
@@ -356,17 +358,6 @@ function httpError(status, message) {
 
 function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
-}
-
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
 }
 
 module.exports = router;

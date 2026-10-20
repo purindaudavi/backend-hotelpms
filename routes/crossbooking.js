@@ -4,6 +4,8 @@ const CrossBooking = require("../db_models/crossbooking.model");
 const Reservation = require("../db_models/booking.model");
 const { ACTIVE_RESERVATION_STATUSES } = require("../db_models/booking.model");
 const RoomType = require("../db_models/rooms.model");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { physicalAssignments } = require("../services/booking-inventory-dates.service");
 
 const router = express.Router();
 
@@ -49,39 +51,41 @@ router.post("/", asyncHandler(async (req, res) => {
     throw badRequest("A room cannot be cross-booked with itself.");
   }
 
-  const [roomA, roomB] = await Promise.all([
-    resolvePhysicalRoom(propertyId, roomAId),
-    resolvePhysicalRoom(propertyId, roomBId)
-  ]);
-  if (!roomA || !roomB) {
-    throw notFound("One or both physical rooms do not exist or are disabled.");
-  }
+  const link = await withInventoryTransaction(propertyId, async (session) => {
+    const roomA = await resolvePhysicalRoom(propertyId, roomAId, session);
+    const roomB = await resolvePhysicalRoom(propertyId, roomBId, session);
+    if (!roomA || !roomB) {
+      throw notFound("One or both physical rooms do not exist or are disabled.");
+    }
 
-  const active = req.body?.active !== false;
-  if (active) {
-    await ensurePairHasNoExistingReservationConflict(
-      propertyId,
-      roomA.physical_room._id,
-      roomB.physical_room._id
-    );
-  }
+    const active = req.body?.active !== false;
+    if (active) {
+      await ensurePairHasNoExistingReservationConflict(
+        propertyId,
+        roomA.physical_room._id,
+        roomB.physical_room._id,
+        session
+      );
+    }
 
-  const actor = actorFromRequest(req);
-  const link = new CrossBooking({
-    property_id: propertyId,
-    room_a_id: roomA.physical_room._id,
-    room_b_id: roomB.physical_room._id,
-    room_a_number: roomA.physical_room.room_number,
-    room_b_number: roomB.physical_room.room_number,
-    room_a_type_id: roomA.room_type._id,
-    room_b_type_id: roomB.room_type._id,
-    room_a_type_name: roomA.room_type.name,
-    room_b_type_name: roomB.room_type.name,
-    active,
-    created_by: actor,
-    updated_by: actor
+    const actor = actorFromRequest(req);
+    const link = new CrossBooking({
+      property_id: propertyId,
+      room_a_id: roomA.physical_room._id,
+      room_b_id: roomB.physical_room._id,
+      room_a_number: roomA.physical_room.room_number,
+      room_b_number: roomB.physical_room.room_number,
+      room_a_type_id: roomA.room_type._id,
+      room_b_type_id: roomB.room_type._id,
+      room_a_type_name: roomA.room_type.name,
+      room_b_type_name: roomB.room_type.name,
+      active,
+      created_by: actor,
+      updated_by: actor
+    });
+    await link.save({ session });
+    return link;
   });
-  await link.save();
 
   return res.status(201).json({
     message: "Cross-booking relationship created successfully.",
@@ -96,34 +100,36 @@ router.get("/:crossBookingId", asyncHandler(async (req, res) => {
 }));
 
 router.patch("/:crossBookingId", asyncHandler(async (req, res) => {
-  const link = await findCrossBooking(req);
-  if (!link) throw notFound("Cross-booking relationship not found.");
+  const link = await withInventoryTransaction(requirePropertyId(req), async (session) => {
+    const link = await findCrossBooking(req, session);
+    if (!link) throw notFound("Cross-booking relationship not found.");
 
-  if (!Object.prototype.hasOwnProperty.call(req.body || {}, "active")) {
-    throw badRequest("Only the active field can be changed. Delete and recreate a link to change its rooms.");
-  }
-  if (typeof req.body.active !== "boolean") {
-    throw badRequest("active must be true or false.");
-  }
-
-  if (req.body.active && !link.active) {
-    const [roomA, roomB] = await Promise.all([
-      resolvePhysicalRoom(link.property_id, link.room_a_id),
-      resolvePhysicalRoom(link.property_id, link.room_b_id)
-    ]);
-    if (!roomA || !roomB) {
-      throw conflict("Both physical rooms must exist and be enabled before this link can be activated.");
+    if (!Object.prototype.hasOwnProperty.call(req.body || {}, "active")) {
+      throw badRequest("Only the active field can be changed. Delete and recreate a link to change its rooms.");
     }
-    await ensurePairHasNoExistingReservationConflict(
-      link.property_id,
-      link.room_a_id,
-      link.room_b_id
-    );
-  }
+    if (typeof req.body.active !== "boolean") {
+      throw badRequest("active must be true or false.");
+    }
 
-  link.active = req.body.active;
-  link.updated_by = actorFromRequest(req);
-  await link.save();
+    if (req.body.active && !link.active) {
+      const roomA = await resolvePhysicalRoom(link.property_id, link.room_a_id, session);
+      const roomB = await resolvePhysicalRoom(link.property_id, link.room_b_id, session);
+      if (!roomA || !roomB) {
+        throw conflict("Both physical rooms must exist and be enabled before this link can be activated.");
+      }
+      await ensurePairHasNoExistingReservationConflict(
+        link.property_id,
+        link.room_a_id,
+        link.room_b_id,
+        session
+      );
+    }
+
+    link.active = req.body.active;
+    link.updated_by = actorFromRequest(req);
+    await link.save({ session });
+    return link;
+  });
 
   return res.status(200).json({
     message: `Cross-booking relationship ${link.active ? "activated" : "disabled"} successfully.`,
@@ -132,10 +138,12 @@ router.patch("/:crossBookingId", asyncHandler(async (req, res) => {
 }));
 
 router.delete("/:crossBookingId", asyncHandler(async (req, res) => {
-  const link = await findCrossBooking(req);
-  if (!link) throw notFound("Cross-booking relationship not found.");
+  await withInventoryTransaction(requirePropertyId(req), async (session) => {
+    const link = await findCrossBooking(req, session);
+    if (!link) throw notFound("Cross-booking relationship not found.");
 
-  await link.deleteOne();
+    await link.deleteOne({ session });
+  });
   return res.status(200).json({
     message: "Cross-booking relationship deleted successfully."
   });
@@ -174,14 +182,14 @@ router.use((error, _req, res, _next) => {
   });
 });
 
-async function resolvePhysicalRoom(propertyId, physicalRoomId) {
+async function resolvePhysicalRoom(propertyId, physicalRoomId, session) {
   const roomType = await RoomType.findOne({
     property_id: propertyId,
     active: true,
     physical_rooms: {
       $elemMatch: { _id: physicalRoomId, active: true }
     }
-  });
+  }).session(session || null);
   if (!roomType) return null;
   return {
     room_type: roomType,
@@ -192,36 +200,22 @@ async function resolvePhysicalRoom(propertyId, physicalRoomId) {
 async function ensurePairHasNoExistingReservationConflict(
   propertyId,
   roomAId,
-  roomBId
+  roomBId,
+  session
 ) {
   const reservations = await Reservation.find(
     {
       property_id: propertyId,
       status: { $in: ACTIVE_RESERVATION_STATUSES },
-      deleted_at: { $exists: false },
-      rooms: {
-        $elemMatch: { physical_room_id: { $in: [roomAId, roomBId] } }
-      }
+      deleted_at: { $exists: false }
     },
-    { reservation_no: 1, check_in: 1, check_out: 1, rooms: 1 }
-  );
+    { reservation_no: 1, check_in: 1, check_out: 1, is_day_room: 1, rooms: 1, room_moves: 1 }
+  ).session(session || null);
 
-  const roomAReservations = reservations.filter((reservation) =>
-    reservation.rooms.some(
-      (room) => String(room.physical_room_id || "") === String(roomAId)
-    )
-  );
-  const roomBReservations = reservations.filter((reservation) =>
-    reservation.rooms.some(
-      (room) => String(room.physical_room_id || "") === String(roomBId)
-    )
-  );
-
-  const overlap = roomAReservations.find((first) =>
-    roomBReservations.some(
-      (second) => first.check_in < second.check_out && first.check_out > second.check_in
-    )
-  );
+  const assignments = reservations.flatMap(physicalAssignments);
+  const roomAReservations = assignments.filter((item) => String(item.physical_room_id) === String(roomAId));
+  const roomBReservations = assignments.filter((item) => String(item.physical_room_id) === String(roomBId));
+  const overlap = roomAReservations.find((first) => roomBReservations.some((second) => first.start < second.end && first.end > second.start));
   if (overlap) {
     throw conflict(
       "These rooms already have overlapping active reservations and cannot be linked."
@@ -229,13 +223,13 @@ async function ensurePairHasNoExistingReservationConflict(
   }
 }
 
-async function findCrossBooking(req) {
+async function findCrossBooking(req, session) {
   if (!mongoose.isValidObjectId(req.params.crossBookingId)) return null;
   const propertyId = requirePropertyId(req);
   return CrossBooking.findOne({
     _id: req.params.crossBookingId,
     property_id: propertyId
-  });
+  }).session(session || null);
 }
 
 function roomIdFrom(payload, primaryField, aliasField) {

@@ -13,6 +13,7 @@ const {
   ensureInvoiceForConfirmedReservation
 } = require("./invoice-automation.service");
 const { writeAuditLog } = require("./booking-audit.service");
+const { withInventoryTransaction } = require("./inventory-transaction.service");
 
 const SUPPORTED_STATUSES = new Set(["tentative", "confirmed"]);
 const PROVIDER_NAMES = {
@@ -109,7 +110,7 @@ async function createSimulatedOtaReservation(input, { requestId = "" } = {}) {
   }
 
   try {
-    return await inTransaction(async (session) => {
+    return await withInventoryTransaction(payload.property_id, async (session) => {
       const existing = await findExisting(payload, session);
       if (existing) return { created: false, reservation: existing, invoice: null };
 
@@ -262,19 +263,6 @@ async function upsertGuest(payload, session) {
     },
     { returnDocument: "after", upsert: true, runValidators: true, session }
   );
-}
-
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => {
-      result = await work(session);
-    });
-    return result;
-  } finally {
-    await session.endSession();
-  }
 }
 
 function providerDisplayName(provider) {
