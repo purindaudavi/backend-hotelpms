@@ -7,6 +7,10 @@ const Purchase = require("../db_models/purchase.model");
 const Expense = require("../db_models/expense.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const FinancialTransaction = require("../db_models/financial-transaction.model");
+const { hasPropertyPermission } = require("./property-permissions.service");
+const { HOUSEKEEPING_NOTIFICATION_TYPES, listHousekeepingNotifications, canReadHousekeepingNotification } = require("./housekeeping-notification.service");
+
+const FRONT_DESK_NOTIFICATION_TYPES = Object.freeze(["booking", "invoice", "payment"]);
 
 const notificationSources = [
   {
@@ -41,7 +45,7 @@ const notificationSources = [
       reference: record.invoice_no || String(record.reservation_id || ""),
       href: record.invoice_no
         ? entityHref(propertyId, "financials/invoices", record.invoice_no)
-        : `/properties/${encodeURIComponent(propertyId)}/financials/transactions`
+        : entityHref(propertyId, "reservation/bookings", String(record.reservation_id || ""))
     })
   },
   {
@@ -69,10 +73,10 @@ const notificationSources = [
   {
     type: "withdrawal",
     model: Withdrawal,
-    select: "withdrawal_no paid_to status currency amount created_at",
+    select: "withdrawal_no paid_to recipient_role requested_by.name status currency amount created_at",
     build: (record, propertyId) => ({
-      title: `Withdrawal ${record.withdrawal_no} recorded`,
-      message: joinDetails(record.paid_to, readable(record.status), money(record.amount, record.currency)),
+      title: record.status === "pending" ? `Withdrawal ${record.withdrawal_no} awaiting approval` : record.status === "voided" ? `Withdrawal ${record.withdrawal_no} voided` : `Withdrawal ${record.withdrawal_no} recorded`,
+      message: joinDetails(`${record.status === "pending" ? "Requested recipient" : "Recipient"}: ${record.paid_to}`, record.recipient_role ? readable(record.recipient_role) : "", record.requested_by?.name ? `Requested by ${record.requested_by.name}` : "", readable(record.status), money(record.amount, record.currency)),
       reference: record.withdrawal_no,
       href: entityHref(propertyId, "financials/withdrawals", record.withdrawal_no)
     })
@@ -112,11 +116,33 @@ const notificationSources = [
   }
 ];
 
-async function listPropertyNotifications(propertyId, limit = 30) {
+function notificationTypesForRole(role) {
+  if (role === "finance") return notificationSources.filter(source => source.type !== "booking").map(source => source.type);
+  if (["owner", "administrator"].includes(role)) return [...notificationSources.map(source => source.type), ...HOUSEKEEPING_NOTIFICATION_TYPES];
+  if (role === "housekeeping") return [...HOUSEKEEPING_NOTIFICATION_TYPES];
+  if (hasPropertyPermission(role, "operations.manage") || role === "demo") return notificationSources.map((source) => source.type);
+  return role === "front_desk" ? [...FRONT_DESK_NOTIFICATION_TYPES] : [];
+}
+
+function sourceFilter(propertyId, type, role) {
+  const filter = { property_id: propertyId };
+  if (role === "front_desk") {
+    if (type === "booking") filter.deleted_at = { $exists: false };
+    if (type === "invoice" || type === "payment") filter.reservation_id = { $ne: null };
+    if (type === "payment") filter.status = "posted";
+  }
+  return filter;
+}
+
+async function listPropertyNotifications(propertyId, limit = 30, role, audience) {
   const perSourceLimit = Math.min(Math.max(Number(limit) || 30, 1), 100);
-  const batches = await Promise.all(notificationSources.map(async (source) => {
+  const allowedTypes = notificationTypesForRole(role);
+  // Filter before database reads, pagination and unread counting. A request's
+  // type/role query parameters never determine the authorized notification set.
+  const sources = notificationSources.filter((source) => allowedTypes.includes(source.type));
+  const batches = await Promise.all(sources.map(async (source) => {
     const records = await source.model
-      .find({ property_id: propertyId })
+      .find(sourceFilter(propertyId, source.type, role))
       .sort({ created_at: -1 })
       .limit(perSourceLimit)
       .select(source.select)
@@ -124,12 +150,21 @@ async function listPropertyNotifications(propertyId, limit = 30) {
 
     return records.map((record) => buildNotification(source, record, propertyId));
   }));
+  batches.push(await listHousekeepingNotifications(propertyId, perSourceLimit, role, audience));
 
   return batches
     .flat()
     .filter((item) => item.timestamp)
     .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
     .slice(0, perSourceLimit);
+}
+
+async function canReadPropertyNotification(propertyId, notificationId, role, audience) {
+  const match = /^([a-z_]+):([a-f\d]{24})$/i.exec(notificationId);
+  if (!match || !notificationTypesForRole(role).includes(match[1])) return false;
+  if (HOUSEKEEPING_NOTIFICATION_TYPES.includes(match[1])) return canReadHousekeepingNotification(propertyId, match[1], match[2], role, audience);
+  const source = notificationSources.find((item) => item.type === match[1]);
+  return Boolean(await source.model.findOne({ ...sourceFilter(propertyId, source.type, role), _id: match[2] }).select("_id").lean());
 }
 
 function buildNotification(source, record, propertyId) {
@@ -169,5 +204,7 @@ module.exports = {
   buildNotification,
   entityHref,
   listPropertyNotifications,
-  notificationSources
+  notificationSources,
+  notificationTypesForRole,
+  canReadPropertyNotification
 };

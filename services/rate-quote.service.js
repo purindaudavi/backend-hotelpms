@@ -14,7 +14,8 @@ async function quoteRatePlan({
   adults = 1,
   children = 0,
   dayRoom = false,
-  allowInactive = false
+  allowInactive = false,
+  session = null
 }) {
   if (!mongoose.isValidObjectId(ratePlanId)) {
     throw httpError(400, "rate_plan_id must be a valid MongoDB ObjectId.");
@@ -36,10 +37,9 @@ async function quoteRatePlan({
     ? [arrival]
     : enumerateStayDates(arrival, departure, MAX_QUOTE_NIGHTS);
 
-  const [plan, roomType] = await Promise.all([
-    RatePlan.findOne({ _id: ratePlanId, property_id: propertyId }),
-    RoomType.findOne({ _id: roomTypeId, property_id: propertyId })
-  ]);
+  const planQuery = RatePlan.findOne({ _id: ratePlanId, property_id: propertyId });
+  const roomQuery = RoomType.findOne({ _id: roomTypeId, property_id: propertyId });
+  const [plan, roomType] = await Promise.all([session ? planQuery.session(session) : planQuery, session ? roomQuery.session(session) : roomQuery]);
   if (!plan) throw httpError(404, "Rate plan not found for this property.");
   if (!roomType) throw httpError(404, "Room type not found for this property.");
   if (!allowInactive && !plan.active) {
@@ -74,12 +74,13 @@ async function quoteRatePlan({
   }
 
   const restrictionEnd = dayRoom ? arrival : departure;
-  const overrides = await DailyRate.find({
+  const overrideQuery = DailyRate.find({
     property_id: propertyId,
     rate_plan_id: plan._id,
     room_type_id: roomType._id,
     date: { $gte: arrival, $lte: restrictionEnd }
   }).sort({ date: 1 });
+  const overrides = await (session ? overrideQuery.session(session) : overrideQuery);
   const overridesByDate = new Map(
     overrides.map((override) => [dateKey(override.date), override])
   );

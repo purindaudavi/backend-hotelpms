@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const { ActorSchema } = require("./booking.model");
 
-const WITHDRAWAL_STATUSES = ["completed", "voided"];
+const WITHDRAWAL_STATUSES = ["pending", "completed", "voided"];
 const SOURCE_ACCOUNTS = ["cash_on_hand", "petty_cash", "main_bank_account", "other"];
 const PAYMENT_METHODS = ["cash", "bank_transfer", "cheque", "other"];
 
@@ -26,9 +26,10 @@ const WithdrawalSchema = new mongoose.Schema(
       required: [true, "Paid-to name is required."],
       trim: true,
       maxlength: 150,
-      default: "ASIRI PERERA",
       immutable: true
     },
+    recipient_user_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", immutable: true },
+    recipient_role: { type: String, enum: ["owner", "administrator"], immutable: true },
     amount: {
       type: Number,
       required: [true, "Withdrawal amount is required."],
@@ -73,6 +74,11 @@ const WithdrawalSchema = new mongoose.Schema(
       index: true
     },
     recorded_by: { type: ActorSchema, default: () => ({}) },
+    requested_by: { type: ActorSchema, default: () => ({}) },
+    requested_at: { type: Date },
+    approved_by: { type: ActorSchema, default: () => ({}) },
+    approved_at: { type: Date },
+    approval_note: { type: String, trim: true, maxlength: 1000, default: "" },
     voided_at: { type: Date, required: false },
     voided_by: { type: ActorSchema, required: false },
     void_reason: { type: String, trim: true, maxlength: 1000, default: "" }
@@ -102,7 +108,7 @@ WithdrawalSchema.index(
 WithdrawalSchema.pre("validate", function normalizeWithdrawal() {
   this.property_id = String(this.property_id || "").trim();
   this.withdrawal_no = String(this.withdrawal_no || "").trim().toUpperCase();
-  this.paid_to = String(this.paid_to || "ASIRI PERERA").trim();
+  this.paid_to = String(this.paid_to || "").trim();
   this.currency = String(this.currency || "LKR").trim().toUpperCase();
   this.source_account = normalizeEnum(this.source_account);
   this.payment_method = normalizeEnum(this.payment_method);

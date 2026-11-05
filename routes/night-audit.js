@@ -19,6 +19,10 @@ const {
 } = require("../services/night-audit.service");
 const { generateReport, normalizeReportParameters } = require("../services/report-generation.service");
 
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { propertyRole } = require("../services/property-access.service");
+const { permissionsForProperty, canRunNightAudit } = require("../services/property-permissions.service");
+const { financeReviewFields } = require("../services/night-audit.service");
 const router = express.Router();
 const NIGHT_AUDIT_REPORTS = [
   "business-analysis",
@@ -29,7 +33,7 @@ const NIGHT_AUDIT_REPORTS = [
   "reservation-list"
 ];
 
-router.get("/current", asyncHandler(async (req, res) => {
+router.get("/current", auditMutation(async (req, res) => {
   const context = await currentAuditContext(req);
   return res.status(200).json(await responseView(context));
 }));
@@ -43,7 +47,7 @@ router.get("/history", asyncHandler(async (req, res) => {
   return res.status(200).json({ count: records.length, night_audits: records.map(serializeHistoryRecord) });
 }));
 
-router.post("/current/review", asyncHandler(async (req, res) => {
+router.post("/current/review", auditMutation(async (req, res) => {
   const stepId = requireStepId(req.body?.step_id);
   const context = await currentAuditContext(req);
   requireOpen(context.audit);
@@ -62,7 +66,7 @@ router.post("/current/review", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(context));
 }));
 
-router.post("/current/override", asyncHandler(async (req, res) => {
+router.post("/current/override", auditMutation(async (req, res) => {
   const stepId = requireStepId(req.body?.step_id);
   const reason = String(req.body?.reason || "").replace(/\s+/g, " ").trim();
   if (reason.length < 10) throw badRequest("An override reason of at least 10 characters is required.");
@@ -92,8 +96,8 @@ router.post("/current/override", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(context));
 }));
 
-router.post("/current/post-room-revenue", asyncHandler(async (req, res) => {
-  const result = await inTransaction(async (session) => {
+router.post("/current/post-room-revenue", auditMutation(async (req, res) => {
+  const result = await inTransaction(req, async (session) => {
     const context = await currentAuditContext(req, session);
     requireOpen(context.audit);
     const snapshot = await buildNightAuditSnapshot({ ...context, session });
@@ -136,11 +140,12 @@ router.post("/current/post-room-revenue", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(result));
 }));
 
-router.post("/current/review-housekeeping", asyncHandler(async (req, res) => {
+router.post("/current/review-housekeeping", auditMutation(async (req, res) => {
   const context = await currentAuditContext(req);
   requireOpen(context.audit);
   const snapshot = await buildNightAuditSnapshot(context);
-  if (snapshot.dirty_rooms.length) {
+  const housekeeping = buildNightAuditSteps(context.audit, snapshot).find(step => step.id === "housekeeping-close");
+  if (housekeeping.status === "blocked") {
     const error = conflict("Housekeeping has dirty or in-progress rooms. Complete them before review.");
     error.details = snapshot.dirty_rooms;
     throw error;
@@ -152,7 +157,7 @@ router.post("/current/review-housekeeping", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(context));
 }));
 
-router.post("/current/review-channels", asyncHandler(async (req, res) => {
+router.post("/current/review-channels", auditMutation(async (req, res) => {
   const context = await currentAuditContext(req);
   requireOpen(context.audit);
   const snapshot = await buildNightAuditSnapshot(context);
@@ -165,7 +170,7 @@ router.post("/current/review-channels", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(context));
 }));
 
-router.post("/current/generate-reports", asyncHandler(async (req, res) => {
+router.post("/current/generate-reports", auditMutation(async (req, res) => {
   const context = await currentAuditContext(req);
   requireOpen(context.audit);
   if (!context.audit.reports_generated_at) {
@@ -180,7 +185,7 @@ router.post("/current/generate-reports", asyncHandler(async (req, res) => {
       generated.push(await generateReport({ propertyId: context.audit.property_id, reportType, parameters }));
     }
     const actor = actorFromRequest(req);
-    await inTransaction(async (session) => {
+    await inTransaction(req, async (session) => {
       const references = [];
       for (const report of generated) {
         const [run] = await ReportRun.create([{
@@ -216,12 +221,12 @@ router.post("/current/generate-reports", asyncHandler(async (req, res) => {
         session
       });
     });
-    context.audit = await NightAudit.findById(context.audit._id);
+    context.audit = await NightAudit.findById(context.audit._id).session(req.nightAuditSession);
   }
   return res.status(200).json(await responseView(context));
 }));
 
-router.patch("/current/notes", asyncHandler(async (req, res) => {
+router.patch("/current/notes", auditMutation(async (req, res) => {
   const context = await currentAuditContext(req);
   requireOpen(context.audit);
   context.audit.close_note = String(req.body?.close_note || "").trim();
@@ -230,8 +235,8 @@ router.patch("/current/notes", asyncHandler(async (req, res) => {
   return res.status(200).json(await responseView(context));
 }));
 
-router.post("/current/complete", asyncHandler(async (req, res) => {
-  const result = await inTransaction(async (session) => {
+router.post("/current/complete", auditMutation(async (req, res) => {
+  const result = await inTransaction(req, async (session) => {
     const context = await currentAuditContext(req, session);
     requireOpen(context.audit);
     const snapshot = await buildNightAuditSnapshot({ ...context, session });
@@ -277,6 +282,27 @@ router.post("/current/complete", asyncHandler(async (req, res) => {
   });
 }));
 
+router.post("/:auditId/finance-review", auditMutation(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.auditId)) throw badRequest("Invalid audit ID.");
+  const status = req.body?.status;
+  const note = String(req.body?.note || "").trim();
+  if (!["reviewed", "flagged"].includes(status) || note.length > 3000 || (status === "flagged" && note.length < 3)) throw badRequest("Choose Reviewed or Flagged and explain any discrepancy (maximum 3000 characters).");
+  const audit = await NightAudit.findOne({ _id: req.params.auditId, property_id: requirePropertyId(req) }).session(req.nightAuditSession);
+  if (!audit) throw notFound("Night Audit not found.");
+  if (audit.status !== "closed") throw conflict("Complete the Night Audit before Finance reviews it.");
+  if (!Number.isInteger(req.body?.version) || req.body.version !== (audit.version || 0)) throw conflict("This review changed. Reopen the audit before saving your review.");
+  const actor = actorFromRequest(req), at = new Date();
+  audit.finance_review_status = status;
+  audit.finance_review_note = note;
+  audit.finance_reviewed_by = actor;
+  audit.finance_reviewed_at = at;
+  audit.finance_review_history.push({ status, note, actor, at });
+  await audit.save({ session: req.nightAuditSession });
+  await logAuditAction(req, audit, "night_audit_finance_review", `Finance marked audit ${status}: ${note}`);
+  const property = await requireProperty(audit.property_id, req.nightAuditSession);
+  return res.status(200).json(await responseView({ property, audit, session: req.nightAuditSession }));
+}));
+
 router.get("/:auditId", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   if (!mongoose.isValidObjectId(req.params.auditId)) throw badRequest("auditId must be a valid MongoDB ObjectId.");
@@ -287,10 +313,12 @@ router.get("/:auditId", asyncHandler(async (req, res) => {
 }));
 
 async function currentAuditContext(req, session = null) {
+  if (req.nightAuditContext) return req.nightAuditContext;
+  session = session || req.nightAuditSession || null;
   const propertyId = requirePropertyId(req);
   const property = await requireProperty(propertyId, session);
   if (!property.business_date) {
-    property.business_date = dateOnly(req.query.initial_business_date || req.body?.initial_business_date || new Date(), "initial_business_date");
+    property.business_date = dateOnly(new Date());
     property.updated_by = actorFromRequest(req);
     await property.save({ session });
   }
@@ -305,7 +333,12 @@ async function currentAuditContext(req, session = null) {
     }], { session });
     audit = created[0];
   }
-  return { property, audit };
+  if (req.method !== "GET") {
+    if (!mongoose.isValidObjectId(req.body?.audit_id)) throw badRequest("Refresh Night Audit and submit its audit_id.");
+    if (String(audit._id) !== req.body.audit_id) throw conflict("This audit day has changed. Refresh Night Audit before trying again.");
+  }
+  req.nightAuditContext = { property, audit, session };
+  return req.nightAuditContext;
 }
 
 async function responseView(context) {
@@ -340,7 +373,7 @@ function requireOpen(audit) {
 }
 
 async function logAuditAction(req, audit, action, description) {
-  return writeAuditLog({ propertyId: audit.property_id, entityType: "night_audit", entityId: audit._id, action, description, actor: actorFromRequest(req), requestId: requestId(req) });
+  return writeAuditLog({ propertyId: audit.property_id, entityType: "night_audit", entityId: audit._id, action, description, actor: actorFromRequest(req), requestId: requestId(req), session: req.nightAuditSession });
 }
 
 function serializeHistoryRecord(audit) {
@@ -348,6 +381,7 @@ function serializeHistoryRecord(audit) {
     _id: String(audit._id), property_id: audit.property_id, business_date: dateKey(audit.business_date), status: audit.status,
     currency: audit.currency, revenue_posted_amount: audit.revenue_posted_amount, reports: audit.reports,
     close_note: audit.close_note, close_summary: audit.close_summary, closed_at: audit.closed_at, closed_by: audit.closed_by,
+    ...financeReviewFields(audit),
     next_business_date: audit.next_business_date ? dateKey(audit.next_business_date) : ""
   };
 }
@@ -364,15 +398,34 @@ function notFound(message) { return httpError(404, message, "NIGHT_AUDIT_NOT_FOU
 function conflict(message) { return httpError(409, message, "NIGHT_AUDIT_CONFLICT"); }
 function asyncHandler(handler) { return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next); }
 
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
+// Reply only after the transaction commits; every retry reloads permissions and day.
+function auditMutation(handler) {
+  return asyncHandler(async (req, res) => {
+    const result = await withInventoryTransaction(requirePropertyId(req), async session => {
+      req.nightAuditSession = session;
+      req.nightAuditContext = null;
+      const property = await requireProperty(requirePropertyId(req), session);
+      const role = propertyRole(property, req.workspaceUser);
+      const permissions = permissionsForProperty(role, property, req.workspaceUser?._id);
+      const financeReview = req.path.endsWith("/finance-review");
+      const allowed = financeReview ? role === "finance" : req.method === "GET" ?
+        role === "finance" || canRunNightAudit(role, permissions) : canRunNightAudit(role, permissions);
+      if (!allowed || (req.path.endsWith("/override") && !["owner", "administrator"].includes(role))) {
+        throw httpError(403, "Your property role no longer allows this Night Audit action.", "PROPERTY_PERMISSION_DENIED");
+      }
+      let status = 200, body;
+      const reply = { status(value) { status = value; return this; }, json(value) { body = value; } };
+      await handler(req, reply);
+      return { status, body };
+    });
+    req.nightAuditSession = null;
+    req.nightAuditContext = null;
+    return res.status(result.status).json(result.body);
+  });
+}
+
+async function inTransaction(req, work) {
+  return work(req.nightAuditSession);
 }
 
 router.use((error, _req, res, _next) => {

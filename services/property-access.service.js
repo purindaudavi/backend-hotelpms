@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const User = require("../db_models/user.model");
 const Property = require("../db_models/property.model");
+const { permissionsForProperty, authorizePropertyRequest } = require("./property-permissions.service");
 
 function isLegacyAdministrator(user) {
   return ["admin", "developer"].includes(user?.role);
@@ -10,7 +11,10 @@ function propertyRole(property, user) {
   if (!property || !user || property.status === "inactive") return null;
   const userId = String(user._id);
   if (String(property.owner_id || "") === userId) return "owner";
-  if ((property.member_ids || []).some((id) => String(id) === userId)) return "member";
+  if ((property.member_ids || []).some((id) => String(id) === userId)) {
+    if ((property.administrator_ids || []).some((id) => String(id) === userId)) return "administrator";
+    return (property.staff_roles || []).find((item) => String(item.user_id) === userId)?.role || "member";
+  }
   // Preserve existing administrators' access without assigning older hotels to
   // whoever happens to sign in first. New accounts cannot self-register as admin.
   if (!property.owner_id && isLegacyAdministrator(user)) return "owner";
@@ -62,7 +66,7 @@ async function requirePropertyAccess(req, res, next) {
   try {
     // Listing and creation are authenticated, but do not require an existing hotel.
     if (/^\/properties\/?$/.test(req.path) && ["GET", "POST"].includes(req.method)) return next();
-    if (req.path === "/reports/catalog") return next();
+    if (req.path === "/reports/catalog" && !resolveRequestPropertyId(req)) return next();
     const propertyId = resolveRequestPropertyId(req);
     if (!propertyId) return res.status(400).json({ message: "Select a property for this request." });
     const property = await Property.findOne({ property_id: propertyId });
@@ -70,8 +74,9 @@ async function requirePropertyAccess(req, res, next) {
     if (!role) return res.status(403).json({ message: "You do not have access to this property.", code: "PROPERTY_ACCESS_DENIED" });
     req.authorizedProperty = property;
     req.propertyRole = role;
+    req.propertyPermissions = permissionsForProperty(role, property, req.workspaceUser._id);
     req.headers["x-property-id"] = propertyId;
-    next();
+    return authorizePropertyRequest(req, res, next);
   } catch (error) { next(error); }
 }
 

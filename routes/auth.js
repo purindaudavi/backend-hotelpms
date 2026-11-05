@@ -14,7 +14,22 @@ const hashToken = (token) => crypto.createHash("sha256").update(token).digest("h
 
 
 router.post("/register", async (req, res) => {
-  const { name, email, password, role, emp_no, mobile } = req.body;
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const password = req.body?.password;
+  const mobile = typeof req.body?.mobile === "string" ? req.body.mobile.trim() : "";
+  if (!name || !email || typeof password !== "string" || !password || !mobile) {
+    return res.status(400).json({ message: "Name, email, password and mobile are required." });
+  }
+  if (name.length > 100 || email.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ message: "Enter a valid name and email address (up to 100 characters each)." });
+  }
+  if (password.length < 6 || Buffer.byteLength(password, "utf8") > 72) {
+    return res.status(400).json({ message: password.length < 6 ? "Use at least 6 characters for the password." : "Password is too long. Choose a shorter password." });
+  }
+  if (mobile.length > 15) {
+    return res.status(400).json({ message: "Mobile number must contain no more than 15 characters." });
+  }
   try {
     // Check if the user already exists
     const existingUser = await User.findOne({ email });
@@ -30,13 +45,14 @@ router.post("/register", async (req, res) => {
       email,
       password: hashedPassword,
       role: "user",
-      emp_no,
       mobile
     });
 
     await newUser.save();
-    res.status(201).json({ message: "User created successfully" });
+    res.status(201).json({ message: "Account created successfully" });
   } catch (error) {
+    if (error?.code === 11000) return res.status(409).json({ message: "An account already uses this email address." });
+    if (error instanceof mongoose.Error.ValidationError) return res.status(400).json({ message: "Check your name, email and mobile number." });
     console.error(error);
     res.status(500).json({ message: "Internal server error" });
   }

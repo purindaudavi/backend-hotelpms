@@ -10,6 +10,13 @@ const {
 } = require("../services/financial-transaction.service");
 
 const router = express.Router();
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { listWithdrawalRecipients, resolveWithdrawalRecipient, withdrawalProperty } = require("../services/withdrawal-recipient.service");
+
+router.get("/recipients", asyncHandler(async (req, res) => {
+  const { property } = await withdrawalProperty(req);
+  res.json({ recipients: await listWithdrawalRecipients(property) });
+}));
 
 router.get("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
@@ -67,7 +74,10 @@ router.post("/", asyncHandler(async (req, res) => {
     throw badRequest("money_received_at cannot be in the future.");
   }
 
-  const withdrawal = await inTransaction(async (session) => {
+  const withdrawal = await withInventoryTransaction(propertyId, async (session) => {
+    const { property, role } = await withdrawalProperty(req, session);
+    const pending = role === "finance";
+    const recipient = await resolveWithdrawalRecipient(property, req.body?.recipient_user_id, session);
     const withdrawalNo = await nextDocumentNumber({
       propertyId,
       documentType: "withdrawal",
@@ -77,7 +87,9 @@ router.post("/", asyncHandler(async (req, res) => {
     const [record] = await Withdrawal.create([{
       property_id: propertyId,
       withdrawal_no: withdrawalNo,
-      paid_to: "ASIRI PERERA",
+      paid_to: recipient.name,
+      recipient_user_id: recipient.user_id,
+      recipient_role: recipient.role,
       amount: positiveMoney(req.body?.amount, "amount"),
       currency: req.body?.currency || "LKR",
       source_account: req.body?.source_account,
@@ -86,11 +98,12 @@ router.post("/", asyncHandler(async (req, res) => {
       money_received_at: moneyReceivedAt,
       reference_number: req.body?.reference_number,
       notes: req.body?.notes,
-      status: "completed",
-      recorded_by: actor
+      status: pending ? "pending" : "completed",
+      recorded_by: actor,
+      ...(pending ? { requested_by: actor, requested_at: new Date() } : { approved_by: actor, approved_at: new Date() })
     }], { session });
 
-    await postFinancialTransaction({
+    if (!pending) await postFinancialTransaction({
       propertyId: record.property_id,
       sourceType: "withdrawal",
       sourceId: record._id,
@@ -108,15 +121,15 @@ router.post("/", asyncHandler(async (req, res) => {
 
     await writeWithdrawalLog({
       withdrawal: record,
-      action: "withdrawal_recorded",
-      description: `Withdrawal ${record.withdrawal_no} was recorded for ${record.currency} ${record.amount.toFixed(2)} paid to ${record.paid_to}.`,
+      action: pending ? "withdrawal_requested" : "withdrawal_recorded",
+      description: `Withdrawal ${record.withdrawal_no} was ${pending ? "requested for Owner/Admin approval" : "recorded"} for ${record.currency} ${record.amount.toFixed(2)} ${pending ? "for recipient" : "paid to"} ${record.paid_to} (${recipient.role}).`,
       actor, req, session
     });
     return record;
   });
 
   return res.status(201).json({
-    message: `Withdrawal ${withdrawal.withdrawal_no} recorded successfully.`,
+    message: withdrawal.status === "pending" ? `Withdrawal ${withdrawal.withdrawal_no} requested. Owner/Admin approval is required before it counts as money withdrawn.` : `Withdrawal ${withdrawal.withdrawal_no} recorded successfully.`,
     withdrawal: serializeWithdrawal(withdrawal)
   });
 }));
@@ -132,11 +145,45 @@ router.get("/:withdrawalId", asyncHandler(async (req, res) => {
   return res.status(200).json({ withdrawal: serializeWithdrawal(withdrawal), logs });
 }));
 
+router.post("/:withdrawalId/complete", asyncHandler(async (req, res) => {
+  if (!["owner", "administrator"].includes(req.propertyRole)) return res.status(403).json({ message: "Only Owner/Admin can approve and record a withdrawal." });
+  const note = String(req.body?.note || "").trim();
+  if (note.length < 5 || note.length > 1000) throw badRequest("Enter an approval note of 5-1000 characters.");
+  const receivedAt = parseDate(req.body?.money_received_at, "money_received_at");
+  if (receivedAt.getTime() > Date.now() + 300000) throw badRequest("money_received_at cannot be in the future.");
+  const actor = actorFromRequest(req), propertyId = requirePropertyId(req);
+  const withdrawal = await withInventoryTransaction(propertyId, async session => {
+    const { property, role } = await withdrawalProperty(req, session);
+    if (!["owner", "administrator"].includes(role)) throw Object.assign(new Error("Only Owner/Admin can approve and record a withdrawal."), { statusCode: 403 });
+    const record = await findWithdrawal(req, session);
+    if (!record) throw notFound("Withdrawal not found.");
+    if (record.status !== "pending") throw conflict("Only a pending withdrawal can be approved.");
+    if (!Number.isInteger(req.body?.version) || req.body.version !== (record.__v || 0)) throw conflict("This withdrawal changed. Refresh before approving.");
+    if (!record.recipient_user_id) throw conflict("This older request has no verified recipient. Reject it and create a new request with a selected recipient.");
+    try { await resolveWithdrawalRecipient(property, String(record.recipient_user_id), session); }
+    catch (error) {
+      if (error.statusCode === 400) throw conflict("The requested recipient is no longer eligible. Reject this request and create a new one with a current Owner or Administrator.");
+      throw error;
+    }
+    record.status = "completed"; record.money_received_at = receivedAt;
+    record.approved_by = actor; record.approved_at = new Date(); record.approval_note = note;
+    await record.save({ session });
+    await postFinancialTransaction({ propertyId, sourceType: "withdrawal", sourceId: record._id, sourceNumber: record.withdrawal_no,
+      transactionDate: receivedAt, direction: "out", accountingEffect: "decrease", amount: record.amount, currency: record.currency,
+      description: `Withdrawal ${record.withdrawal_no} paid to ${record.paid_to}: ${record.reason}`, actor, requestId: requestId(req), session });
+    await writeWithdrawalLog({ withdrawal: record, action: "withdrawal_approved", description: `Withdrawal ${record.withdrawal_no} approved and recorded. ${note}`, actor, req, session });
+    return record;
+  });
+  res.json({ message: `Withdrawal ${withdrawal.withdrawal_no} approved and recorded.`, withdrawal: serializeWithdrawal(withdrawal) });
+}));
+
 router.post("/:withdrawalId/void", asyncHandler(async (req, res) => {
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const withdrawal = await inTransaction(async (session) => {
+  const withdrawal = await withInventoryTransaction(requirePropertyId(req), async (session) => {
+    const { role } = await withdrawalProperty(req, session);
+    if (!["owner", "administrator"].includes(role)) throw Object.assign(new Error("Only Owner/Admin can reject or void a withdrawal."), { statusCode: 403 });
     const record = await findWithdrawal(req, session);
     if (!record) throw notFound("Withdrawal not found.");
     if (record.status === "voided") throw conflict("This withdrawal is already voided.");
@@ -199,6 +246,7 @@ function requestId(req) {
 function serializeWithdrawal(withdrawal) {
   const value = serializeFinancialDocument(withdrawal);
   value.effective_amount = value.status === "completed" ? value.amount : 0;
+  value.version = withdrawal.__v || 0;
   return value;
 }
 

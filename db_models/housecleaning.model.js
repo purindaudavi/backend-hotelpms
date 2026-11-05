@@ -19,7 +19,7 @@ const HousekeepingTaskSchema = new mongoose.Schema(
     room_type_name: { type: String, required: true, trim: true, maxlength: 120 },
     status: {
       type: String,
-      enum: ["assigned", "in_progress", "completed", "inspected"],
+      enum: ["requested", "assigned", "in_progress", "completed", "inspected"],
       default: "assigned",
       index: true
     },
@@ -32,6 +32,8 @@ const HousekeepingTaskSchema = new mongoose.Schema(
     attendant: { type: AttendantSnapshotSchema, default: () => ({}) },
     notes: { type: String, trim: true, maxlength: 1000, default: "" },
     assigned_at: { type: Date, default: null },
+    requested_at: { type: Date, default: null },
+    requested_by: { type: ActorSchema, default: () => ({}) },
     started_at: { type: Date, default: null },
     completed_at: { type: Date, default: null },
     inspected_at: { type: Date, default: null },
@@ -50,6 +52,7 @@ HousekeepingTaskSchema.index(
   { unique: true }
 );
 HousekeepingTaskSchema.index({ property_id: 1, status: 1, priority: 1, updated_at: -1 });
+HousekeepingTaskSchema.index({ property_id: 1, "attendant.attendant_id": 1, status: 1 });
 
 const HousekeepingAttendantSchema = new mongoose.Schema(
   {
@@ -92,7 +95,7 @@ const HousekeepingActivitySchema = new mongoose.Schema(
     room_type_name: { type: String, required: true, trim: true, maxlength: 120 },
     action: {
       type: String,
-      enum: ["room_marked_dirty", "assigned", "cleaning_started", "cleaning_completed", "inspection_completed"],
+      enum: ["room_marked_dirty", "requested", "assigned", "claimed", "cleaning_started", "cleaning_completed", "inspection_completed"],
       required: true,
       index: true
     },
@@ -101,6 +104,7 @@ const HousekeepingActivitySchema = new mongoose.Schema(
     attendant: { type: AttendantSnapshotSchema, default: () => ({}) },
     notes: { type: String, trim: true, maxlength: 1000, default: "" },
     actor: { type: ActorSchema, default: () => ({}) },
+    actor_role: { type: String, enum: ["", "owner", "administrator", "front_desk", "housekeeping", "member"], default: "" },
     request_id: { type: String, trim: true, maxlength: 150, default: "" },
     created_at: { type: Date, required: true, default: Date.now, immutable: true }
   },

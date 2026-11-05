@@ -39,8 +39,13 @@ test("withdrawal requires a positive amount, reason and received date", async ()
   });
 });
 
-test("withdrawal has no approval or selectable withdrawal-type fields", () => {
+test("withdrawal retains legacy defaults and supports pending Finance requests with separate approval metadata", async () => {
   assert.equal(Withdrawal.schema.path("approval_status"), undefined);
   assert.equal(Withdrawal.schema.path("withdrawal_type"), undefined);
   assert.ok(Withdrawal.schema.path("reason"));
+  const pending = validWithdrawal({ status: "pending", requested_by: { name: "Finance" }, approval_note: "" });
+  await pending.validate();
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.requested_by.name, "Finance");
+  assert.equal(pending.approved_at, undefined);
 });

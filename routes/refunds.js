@@ -1,5 +1,6 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const Refund = require("../db_models/refund.model");
 const Invoice = require("../db_models/invoice.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
@@ -59,7 +60,7 @@ router.get("/", asyncHandler(async (req, res) => {
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const invoice = await Invoice.findOne({
       _id: objectId(req.body?.invoice_id, "invoice_id"),
       property_id: propertyId
@@ -148,7 +149,7 @@ router.get("/:refundId", asyncHandler(async (req, res) => {
 
 router.patch("/:refundId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const refund = await inTransaction(async (session) => {
+  const refund = await inTransaction(req, async (session) => {
     const record = await findRefund(req, session);
     if (!record) throw notFound("Refund not found.");
     if (record.status !== "pending") throw conflict("Only a pending refund can be edited.");
@@ -194,7 +195,7 @@ router.patch("/:refundId", asyncHandler(async (req, res) => {
 
 router.post("/:refundId/complete", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const refund = await findRefund(req, session);
     if (!refund) throw notFound("Refund not found.");
     if (refund.status !== "pending") throw conflict("Only a pending refund can be completed.");
@@ -286,7 +287,7 @@ router.post("/:refundId/void", asyncHandler(async (req, res) => {
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const refund = await findRefund(req, session);
     if (!refund) throw notFound("Refund not found.");
     if (refund.status === "voided") throw conflict("This refund is already voided.");
@@ -496,15 +497,8 @@ function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
+function inTransaction(req, work) {
+  return withInventoryTransaction(requirePropertyId(req), work);
 }
 
 function financialErrorHandler(error, _req, res, _next) {

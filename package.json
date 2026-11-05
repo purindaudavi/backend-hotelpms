@@ -15,6 +15,10 @@
   "type": "commonjs",
   "main": "app.js",
   "scripts": {
+    "check:access": "node --check services/property-permissions.service.js && node --check services/property-access.service.js && node --check services/property-creation.service.js && node --check routes/property-creation.js && node --check routes/platform-properties.js && node --check routes/property-deletion.js && node --check services/property-archive.service.js && node --check db_models/property-deletion-request.model.js && node --check db_models/property-creation-request.model.js && node --check services/front-desk-booking.service.js && node --check services/housekeeping-work.service.js && node --check services/checkout-review.service.js && node --check services/notification.service.js && node --check services/finance-role.service.js && node --check routes/finance.js && node --check services/housekeeping-notification.service.js && node --check routes/notifications.js && node --check routes/property.js && node --check routes/housecleaning.js && node --test test/finance-role.test.js test/housekeeping-notifications.test.js test/property-deletion.test.js test/platform-properties.test.js test/property-access.test.js test/property-creation.test.js test/signup.test.js test/owner-admin-access.test.js test/front-desk-access.test.js test/front-desk-housekeeping.test.js test/housekeeping-role.test.js test/front-desk-notifications.test.js test/checkout-review.test.js test/channel-connection-request.test.js",
+    "smoke:property-approvals": "node scripts/live-property-approval-smoke.js",
+    "smoke:housekeeping-notifications": "node scripts/live-housekeeping-notifications-smoke.js",
+    "smoke:finance-role": "node scripts/live-finance-role-smoke.js",
     "check:night-audit": "node --check routes/night-audit.js && node --check db_models/night-audit.model.js && node --check services/night-audit.service.js",
     "check:email-templates": "node --check routes/mail.js && node --check routes/email-templates.js && node --check db_models/email-template.model.js && node --check services/email-template.service.js",
     "test": "node --test",

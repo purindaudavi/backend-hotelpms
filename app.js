@@ -27,6 +27,9 @@ const receivableRoutes = require("./routes/receivables");
 const travelAgentRoutes = require("./routes/travelagent");
 const housekeepingRoutes = require("./routes/housecleaning");
 const propertyRoutes = require("./routes/property");
+const propertyCreationRoutes = require("./routes/property-creation");
+const platformPropertyRoutes = require("./routes/platform-properties");
+const propertyDeletionRoutes = require("./routes/property-deletion");
 const otaSimulatorRoutes = require("./routes/ota-simulator");
 const testChannelConnectionRoutes = require("./routes/test-channel-connection");
 const channelBookingRoutes = require("./routes/channel-bookings");
@@ -37,6 +40,7 @@ const emailTemplateRoutes = require("./routes/email-templates");
 const authRoutes = require("./routes/auth");
 const notificationRoutes = require("./routes/notifications");
 const financialTargetRoutes = require("./routes/financial-targets");
+const financeRoutes = require("./routes/finance");
 
 const app = express();
 const { authenticateWorkspace, requirePropertyAccess, requireDemoReadAccess, isPublicPropertyMedia } = require("./services/property-access.service");
@@ -59,6 +63,10 @@ app.get("/api/health", (_req, res) => {
 });
 //auth,login,register,forgot password,reset password,logout
 app.use("/api/auth", authRoutes);
+// Account-scoped approval workflow; never depends on membership of a hotel.
+app.use("/api/property-creation", authenticateWorkspace, propertyCreationRoutes);
+app.use("/api/platform/properties", authenticateWorkspace, platformPropertyRoutes);
+app.use("/api/property-deletion", authenticateWorkspace, propertyDeletionRoutes);
 // Internal reviewers are authenticated separately from hotel-scoped API routes.
 // Public registration cannot create admin/developer accounts.
 app.use("/api/internal/channel-requests", authenticateWorkspace, internalChannelRequestRoutes);
@@ -97,6 +105,7 @@ app.use("/api/night-audit", nightAuditRoutes);
 app.use("/api/email-templates", emailTemplateRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/financial-targets", financialTargetRoutes);
+app.use("/api/finance", financeRoutes);
 
 app.use((error, _req, res, _next) => {
   const status = Number(error?.statusCode || error?.status || 500);

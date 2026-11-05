@@ -40,6 +40,7 @@ test("writes the unique property guard before work and commits with snapshot/maj
   assert.deepEqual(events[0].filter, { _id: "hotel-one" });
   assert.equal(events[0].options.upsert, true);
   assert.deepEqual(events[3].update, { $inc: { revision: 1 } });
+  assert.deepEqual(events[3].filter.property_archived, { $ne: true });
   assert.equal(events[3].options.session, session);
   assert.deepEqual(events[2].options.readConcern, { level: "snapshot" });
   assert.deepEqual(events[2].options.writeConcern, { w: "majority" });
@@ -52,6 +53,13 @@ test("different hotels use different guard IDs", async (t) => {
   await withInventoryTransaction("hotel-one", async () => {});
   await withInventoryTransaction("hotel-two", async () => {});
   assert.deepEqual(events.filter((item) => item.action === "guard").map((item) => item.filter._id), ["hotel-one", "hotel-two"]);
+});
+
+test("only explicit platform maintenance can take an archived property's guard",async t=>{
+  const {events}=setup(t);
+  await withInventoryTransaction("hotel-one",async()=>"restored",{allowArchivedProperty:true});
+  assert.equal(events.find(event=>event.action==="guard").filter.property_archived,undefined);
+  assert.equal(events.find(event=>event.action==="initialize").update.$setOnInsert.property_archived,false);
 });
 
 test("a duplicate guard bootstrap is safe on concurrent first use", async (t) => {

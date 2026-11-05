@@ -1,4 +1,5 @@
 const express = require("express");
+const { requirePropertyPermission } = require("../services/property-permissions.service");
 const {
   connectionStatus,
   syncSnapshot,
@@ -20,8 +21,7 @@ router.get("/connection", asyncHandler(async (req, res) => {
   res.json(await connectionStatus(req.authorizedProperty.property_id));
 }));
 
-router.post("/sync", asyncHandler(async (req, res) => {
-  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can sync the test channel." });
+router.post("/sync", requirePropertyPermission("channels.manage"), asyncHandler(async (req, res) => {
   const snapshot = await syncSnapshot(req.authorizedProperty.property_id);
   res.json({
     state: snapshot.state,

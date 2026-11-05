@@ -24,6 +24,11 @@ const NotificationReadStateSchema = new mongoose.Schema(
     read_through_at: {
       type: Date,
       required: false
+    },
+    read_through_by_type: {
+      type: Map,
+      of: Date,
+      default: () => ({})
     }
   },
   {

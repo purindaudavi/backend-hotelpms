@@ -12,7 +12,11 @@ const {
 
 const router = express.Router();
 const User = require("../db_models/user.model");
+const { requireCreationSlot } = require("../services/property-creation.service");
+const { HousekeepingAttendant } = require("../db_models/housecleaning.model");
 const { accessiblePropertiesQuery, propertyRole } = require("../services/property-access.service");
+const { permissionsForProperty, hasPropertyPermission, requirePropertyPermission } = require("../services/property-permissions.service");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const imageBodyParser = express.raw({
   type: ["image/jpeg", "image/png", "image/webp"],
   limit: "8mb"
@@ -84,39 +88,121 @@ router.get("/", asyncHandler(async (req, res) => {
     city: property.info.city,
     country_code: property.info.country_code,
     home_currency: property.info.home_currency,
-    role: propertyRole(property, req.workspaceUser)
+    role: propertyRole(property, req.workspaceUser),
+    permissions: permissionsForProperty(propertyRole(property, req.workspaceUser), property, req.workspaceUser._id)
   })) });
 }));
 
-router.get("/:propertyId/access", asyncHandler(async (req, res) => {
-  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
+router.get("/:propertyId/my-access", asyncHandler(async (req, res) => {
+  res.json({ role: req.propertyRole, permissions: req.propertyPermissions });
+}));
+
+router.get("/:propertyId/access", requirePropertyPermission("staff.manage"), asyncHandler(async (req, res) => {
   const property = req.authorizedProperty;
   const users = await User.find({ _id: { $in: [property.owner_id, ...property.member_ids].filter(Boolean) } }).select("name email").lean();
   res.json({ members: users.map((user) => ({ id: String(user._id), name: user.name, email: user.email,
-    role: String(user._id) === String(property.owner_id) ? "owner" : "member" })) });
+    role: propertyRole(property, user),
+    run_night_audit: property.staff_roles?.find(assignment => String(assignment.user_id) === String(user._id))?.run_night_audit === true,
+    attendant_id: String(property.staff_roles?.find((assignment) => String(assignment.user_id) === String(user._id))?.attendant_id || "") })) });
 }));
 
-router.post("/:propertyId/access", asyncHandler(async (req, res) => {
-  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
-  const email = String(req.body?.email || "").trim().toLowerCase();
+router.post("/:propertyId/access", requirePropertyPermission("staff.manage"), asyncHandler(async (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  if (!email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw httpError(400, "Enter a valid staff account email.");
+  const role = requestedStaffRole(req);
   const user = await User.findOne({ email });
   if (!user) return res.status(404).json({ message: "No account uses that email. Ask the staff member to register first." });
-  await Property.updateOne({ _id: req.authorizedProperty._id }, { $addToSet: { member_ids: user._id } });
+  await changePropertyAccess(req, user._id, role, "grant");
   res.status(201).json({ message: "Property access granted." });
 }));
 
-router.delete("/:propertyId/access/:userId", asyncHandler(async (req, res) => {
-  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the property owner can manage access." });
+router.patch("/:propertyId/access/:userId/night-audit", requirePropertyPermission("staff.manage"), asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.userId) || typeof req.body?.enabled !== "boolean") throw httpError(400, "A valid account and enabled true/false are required.");
+  await withInventoryTransaction(req.params.propertyId, async session => {
+    const property = await requireProperty(req.params.propertyId, session);
+    if (!["owner", "administrator"].includes(propertyRole(property, req.workspaceUser))) throw httpError(403, "Only Owner/Admin can grant Night Audit permission.");
+    const assignment = property.staff_roles.find(item => String(item.user_id) === req.params.userId);
+    if (propertyRole(property, { _id: req.params.userId }) !== "front_desk" || !assignment) throw httpError(400, "Assign the Front Desk role before granting Run Night Audit.");
+    assignment.run_night_audit = req.body.enabled;
+    property.updated_by = actorFromRequest(req);
+    await property.save({ session });
+    await writeAuditLog({ propertyId: property.property_id, entityType: "property", entityId: property._id,
+      action: "night_audit_permission_changed", description: `Run Night Audit ${req.body.enabled ? "granted to" : "revoked from"} account ${req.params.userId}.`, actor: property.updated_by, session });
+  });
+  res.json({ message: "Night Audit permission updated." });
+}));
+
+router.patch("/:propertyId/access/:userId", requirePropertyPermission("staff.manage"), asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.userId)) throw httpError(400, "Invalid account ID.");
-  if (String(req.authorizedProperty.owner_id) === req.params.userId) throw httpError(400, "The property owner cannot be removed.");
-  await Property.updateOne({ _id: req.authorizedProperty._id }, { $pull: { member_ids: req.params.userId } });
+  const role = requestedStaffRole(req, true);
+  await changePropertyAccess(req, req.params.userId, role, "role");
+  res.json({ message: "Property role updated." });
+}));
+
+router.delete("/:propertyId/access/:userId", requirePropertyPermission("staff.manage"), asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.userId)) throw httpError(400, "Invalid account ID.");
+  await changePropertyAccess(req, req.params.userId, null, "remove");
   res.json({ message: "Property access removed." });
 }));
+
+function requestedStaffRole(req, required = false) {
+  const role = req.body?.role ?? (required ? null : "member");
+  if (!["member", "administrator", "front_desk", "housekeeping", "finance"].includes(role)) throw httpError(400, "Choose General member, Administrator, Front Desk, Housekeeping or Finance.");
+  if (role === "administrator" && !hasPropertyPermission(req.propertyRole, "administrators.manage")) {
+    throw httpError(403, "Only the property owner can appoint administrators.");
+  }
+  return role;
+}
+
+async function changePropertyAccess(req, userId, role, action) {
+  return withInventoryTransaction(req.params.propertyId, async (session) => {
+    // Re-read inside the transaction. Competing grants/revocations retry against
+    // current membership rather than restoring a role from a stale snapshot.
+    const property = await requireProperty(req.params.propertyId, session);
+    const actingRole = propertyRole(property, req.workspaceUser);
+    if (!hasPropertyPermission(actingRole, "staff.manage")) throw httpError(403, "You can no longer manage access to this property.");
+    if (String(property.owner_id) === String(userId) ||
+        (actingRole === "owner" && String(req.workspaceUser._id) === String(userId))) {
+      throw httpError(400, "The property owner's access and role cannot be changed here.");
+    }
+    const oldRole = propertyRole(property, { _id: userId });
+    if ((role === "administrator" || oldRole === "administrator") && actingRole !== "owner") {
+      throw httpError(403, "Only the property owner can change administrator access.");
+    }
+    if (action !== "grant" && !oldRole) throw httpError(404, "This account is not a property member.");
+    if (action === "grant" && oldRole && oldRole !== role) throw httpError(409, "This account already has access. Use Change role to update it.");
+    const previousAssignment = property.staff_roles?.find((item) => String(item.user_id) === String(userId));
+    let attendantId;
+    if (role === "housekeeping") {
+      attendantId = req.body?.attendant_id ?? previousAssignment?.attendant_id;
+      if (!mongoose.isValidObjectId(attendantId)) throw httpError(400, "Select an active attendant record to link to this Housekeeping account.");
+      const attendant = await HousekeepingAttendant.findOne({ _id: attendantId, property_id: property.property_id, status: "active" }).session(session);
+      if (!attendant) throw httpError(400, "Select an active attendant from this property.");
+      if ((property.staff_roles || []).some((item) => String(item.user_id) !== String(userId) && String(item.attendant_id) === String(attendantId))) throw httpError(409, "That attendant is already linked to another account.");
+    } else if (req.body?.attendant_id) throw httpError(400, "An attendant link is only used for the Housekeeping role.");
+    if (oldRole === role && String(previousAssignment?.attendant_id || "") === String(attendantId || "")) return;
+    if (action === "remove") property.member_ids.pull(userId);
+    else property.member_ids.addToSet(userId);
+    if (role === "administrator") property.administrator_ids.addToSet(userId);
+    else property.administrator_ids.pull(userId);
+    property.staff_roles = (property.staff_roles || []).filter((item) => String(item.user_id) !== String(userId));
+    if (["front_desk", "housekeeping", "finance"].includes(role)) property.staff_roles.push({ user_id: userId, role, ...(attendantId ? { attendant_id: attendantId } : {}) });
+    property.updated_by = actorFromRequest(req);
+    await property.save({ session });
+    await writeAuditLog({ propertyId: property.property_id, entityType: "property", entityId: property._id,
+      action: action === "remove" ? "property_access_revoked" : oldRole ? "property_role_changed" : "property_access_granted",
+      description: `Property access for account ${userId}: ${oldRole || "no access"} to ${role || "no access"}.`,
+      actor: property.updated_by, changes: [{ field: `access.${userId}`, from: oldRole, to: role },
+        { field: `attendant_link.${userId}`, from: String(previousAssignment?.attendant_id || ""), to: String(attendantId || "") }],
+      requestId: requestId(req), session });
+  });
+}
 
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
   const property = await inTransaction(async (session) => {
+    await requireCreationSlot(req.workspaceUser._id, session);
     const existing = await Property.findOne({ property_id: propertyId }).session(session);
     if (existing) throw httpError(409, "A property with this property_id already exists.");
 
@@ -265,6 +351,8 @@ router.delete("/:propertyId/meal-allocations/:allocationId", asyncHandler(async 
 
 router.get("/:propertyId", asyncHandler(async (req, res) => {
   const property = await requireProperty(req.params.propertyId);
+  if (["housekeeping", "finance"].includes(req.propertyRole)) return res.json({ property: { property_id: property.property_id,
+    info: { hotel_name: property.info.hotel_name, pms_name: property.info.pms_name, timezone: property.info.timezone }, theme: serializePropertyTheme(property.theme) } });
   return res.status(200).json({ property: await serializeProperty(property) });
 }));
 
@@ -566,7 +654,18 @@ router.patch("/:propertyId/info", asyncHandler(async (req, res) => {
     }
 
     const before = record.toObject({ virtuals: false });
-    applyInfoPayload(record.info, req.body?.info || req.body || {});
+    const payload = req.body?.info || req.body || {};
+    const role = propertyRole(record, req.workspaceUser);
+    if (!hasPropertyPermission(role, "settings.manage")) throw httpError(403, "Your property role does not allow changing settings.");
+    if (!hasPropertyPermission(role, "subscription.manage") && ["plan", "on_trial"].some((field) =>
+      Object.prototype.hasOwnProperty.call(payload, field) && payload[field] !== record.info[field])) {
+      throw httpError(403, "Only the property owner can change plan or trial settings.");
+    }
+    if (["owner_id", "member_ids", "administrator_ids", "staff_roles"].some((field) =>
+      Object.prototype.hasOwnProperty.call(req.body || {}, field) || Object.prototype.hasOwnProperty.call(payload, field))) {
+      throw httpError(400, "Use property access management to change staff access. Ownership cannot be changed here.");
+    }
+    applyInfoPayload(record.info, payload);
     record.updated_by = actor;
     await record.save({ session });
     const after = record.toObject({ virtuals: false });
@@ -821,6 +920,7 @@ async function inTransaction(work) {
 
 router.use((error, _req, res, next) => {
   if (res.headersSent) return next(error);
+  if (error instanceof mongoose.Error.VersionError) return res.status(409).json({ message: "Property settings changed. Refresh and try again." });
   if (error.type === "entity.too.large") {
     return res.status(413).json({ message: "The image exceeds the 8 MB limit." });
   }
@@ -838,8 +938,9 @@ router.use((error, _req, res, next) => {
         : "A property with this property_id already exists."
     });
   }
-  return res.status(error.status || 500).json({
-    message: error.status ? error.message : "Property request could not be completed."
+  return res.status(error.status || error.statusCode || 500).json({
+    message: error.status || error.statusCode ? error.message : "Property request could not be completed.",
+    ...(typeof error.code === "string" ? { code: error.code } : {})
   });
 });
 

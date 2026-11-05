@@ -10,11 +10,13 @@ const {
 const { getDashboardSummary } = require("../services/dashboard.service");
 
 const router = express.Router();
+const { FINANCE_REPORT_TYPES } = require("../services/property-permissions.service");
 
-router.get("/catalog", (_req, res) => {
+router.get("/catalog", (req, res) => {
+  const catalog = req.propertyRole === "finance" ? REPORT_CATALOG.filter(item => FINANCE_REPORT_TYPES.includes(item.report_type)) : REPORT_CATALOG;
   return res.status(200).json({
-    count: REPORT_CATALOG.length,
-    reports: REPORT_CATALOG
+    count: catalog.length,
+    reports: catalog
   });
 });
 
@@ -37,6 +39,10 @@ router.get("/history", asyncHandler(async (req, res) => {
 
   if (req.query.report_type) query.report_type = String(req.query.report_type).trim().toLowerCase();
   if (req.query.status) query.status = String(req.query.status).trim().toLowerCase();
+  if (req.propertyRole === "finance") {
+    if (query.report_type && !FINANCE_REPORT_TYPES.includes(query.report_type)) return res.status(403).json({message:"Finance can access only financial reports."});
+    query.report_type = query.report_type || { $in: FINANCE_REPORT_TYPES };
+  }
 
   const [runs, total] = await Promise.all([
     ReportRun.find(query)
@@ -64,6 +70,7 @@ router.get("/history/:reportRunId", asyncHandler(async (req, res) => {
     property_id: requirePropertyId(req)
   });
   if (!run) throw notFound("Report generation record not found.");
+  if (req.propertyRole === "finance" && !FINANCE_REPORT_TYPES.includes(run.report_type)) throw notFound("Report generation record not found.");
   return res.status(200).json({ report_run: run });
 }));
 

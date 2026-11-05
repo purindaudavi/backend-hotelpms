@@ -1,5 +1,6 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const Invoice = require("../db_models/invoice.model");
 const CreditNote = require("../db_models/credit-note.model");
 const Refund = require("../db_models/refund.model");
@@ -74,7 +75,7 @@ router.get("/", asyncHandler(async (req, res) => {
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const invoice = await inTransaction(async (session) => {
+  const invoice = await inTransaction(req, async (session) => {
     const reservationId = objectId(req.body?.reservation_id, "reservation_id");
     const reservation = await Reservation.findOne({
       _id: reservationId,
@@ -180,7 +181,7 @@ router.get("/:invoiceId", asyncHandler(async (req, res) => {
 
 router.patch("/:invoiceId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const invoice = await inTransaction(async (session) => {
+  const invoice = await inTransaction(req, async (session) => {
     const record = await findInvoice(req, session);
     if (!record) throw notFound("Invoice not found.");
     if (record.status !== "draft") {
@@ -209,7 +210,7 @@ router.patch("/:invoiceId", asyncHandler(async (req, res) => {
 
 router.post("/:invoiceId/issue", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const invoice = await inTransaction(async (session) => {
+  const invoice = await inTransaction(req, async (session) => {
     const record = await findInvoice(req, session);
     if (!record) throw notFound("Invoice not found.");
     if (record.status !== "draft") throw conflict("Only a draft invoice can be issued.");
@@ -257,7 +258,7 @@ router.post("/:invoiceId/void", asyncHandler(async (req, res) => {
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const invoice = await inTransaction(async (session) => {
+  const invoice = await inTransaction(req, async (session) => {
     const record = await findInvoice(req, session);
     if (!record) throw notFound("Invoice not found.");
     if (record.status === "voided") throw conflict("This invoice is already voided.");
@@ -313,7 +314,7 @@ router.get("/:invoiceId/payments", asyncHandler(async (req, res) => {
 
 router.post("/:invoiceId/payments", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const invoice = await findInvoice(req, session);
     if (!invoice) throw notFound("Invoice not found.");
     if (!["issued", "partially_paid"].includes(invoice.status)) {
@@ -380,7 +381,7 @@ router.post("/:invoiceId/payments/:paymentId/void", asyncHandler(async (req, res
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const invoice = await findInvoice(req, session);
     if (!invoice) throw notFound("Invoice not found.");
     const payment = await ReservationPayment.findOne({
@@ -503,15 +504,8 @@ function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
+function inTransaction(req, work) {
+  return withInventoryTransaction(requirePropertyId(req), work);
 }
 
 function financialErrorHandler(documentName) {

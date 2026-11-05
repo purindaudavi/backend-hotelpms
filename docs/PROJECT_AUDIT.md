@@ -10,6 +10,242 @@
   finished monthly-subscription product. OTA integration is only one remaining
   part of the work.
 
+## Withdrawal recipients: 2026-11-04
+
+New withdrawal requests/records now select an actual property Owner or
+Administrator account, displaying name and role. The fixed ASIRI PERERA payee
+was removed for new records. Finance's **Requested recipient** is separate from
+the verified requester and Owner/Admin approver; pending requests remain without
+financial effect and existing in-app notifications reach Owner/Admin/Finance.
+Recipient identity is resolved server-side and eligibility is rechecked at
+approval. Role/membership changes share the existing inventory transaction guard.
+Historical completed payees remain unchanged; unlinked older pending requests
+must be rejected and recreated, rather than guessed or silently reassigned.
+The 257-test backend suite, 42 new live MongoDB checks, 40-check Finance
+regression, frontend TypeScript and isolated desktop/mobile browser checks
+passed. Disposable fixtures were removed. See [workflow and testing](withdrawal-recipients.md).
+
+## Night Audit delegation and Finance review: 2026-10-30
+
+Owner/Admin can grant a property-specific **Run Night Audit** checkbox to
+existing Front Desk staff. Owner/Admin and delegated staff use the same detailed
+screen; blocker overrides remain Owner/Admin-only. Finance uses that layout to
+review completed days separately as Pending Review, Reviewed or Flagged, with
+reviewer/time/notes and append-only review events. Finance cannot post, close,
+override, reopen or edit closed operational data. General members' legacy broad
+access no longer bypasses Night Audit permissions.
+
+Audit completion advances the date independently of Finance review. Audit writes
+and access changes share the property inventory transaction guard, recheck fresh
+permissions and require the displayed audit ID; stale closes cannot close the
+next day. Duplicate posting/report requests are serialized and stale Finance
+reviews require a refresh. The 63-check disposable MongoDB acceptance test passed,
+including Owner/Admin and delegated execution, concurrency, override boundaries,
+review immutability and permission revocation/role reset. Existing accounting
+calculations and unfinished real OTA reconciliation remain separate limitations.
+The full 253-test backend suite, frontend TypeScript compilation and isolated
+desktop/mobile browser checks also passed. Disposable test fixtures were removed.
+See [implementation and test walkthrough](night-audit-delegation-review.md).
+
+## Finance role: 2026-10-30
+
+Finance is now assignable by property Owner/Admin. It has a per-currency finance
+overview, financial modules except Integrations, a billing-only reservation
+projection, eight financial reports/scoped history and Night Audit viewing with
+independent Finance review (extended above).
+An explicit API allowlist blocks operational changes, settings, channels,
+posted-record voids, final credit/refund actions and day closing. Finance
+withdrawals stay pending with zero financial effect until Owner/Admin approval;
+approval/ledger/audit share the inventory guard and reject duplicate decisions.
+Existing completed withdrawals and direct privileged recording are retained.
+Staff revocation applies on the next request. The 250-test backend suite,
+frontend TypeScript/browser checks and 40 MongoDB checks passed; disposable
+fixtures were removed. No real staff or financial records were changed. Reports
+role remains to implement; existing financial accounting/directory limitations
+are not resolved by this role. See [setup, scope and tests](finance-role.md).
+
+## Housekeeping request and assignment notifications: 2026-10-30
+
+Owner/Admin notifications now include property-wide housekeeping request,
+assignment and claim events. Housekeeping has a bell restricted to current open
+requests and their linked active attendant's assignment/claim history. Role and
+attendant checks precede queries/limits/read actions; request-cycle timestamps
+prevent old requests resurfacing when tasks are reused. Read-all is personal
+and preserves hidden recipients/types. Links open the relevant housekeeping
+view; visible-tab polling is every 30 seconds with overlap protection. Front
+Desk's three existing types and general-member/demo's nine types are unchanged.
+The 247-test backend suite, frontend TypeScript/browser checks and 25 MongoDB checks passed;
+disposable fixtures were removed and cleanup verified. See
+[usage, recipient scope and acceptance tests](housekeeping-notifications.md).
+
+## Owner/Admin property deletion requests: 2026-10-29
+
+Your properties now has a small delete icon for Owner/Admin that opens a
+deletion request form. Submission leaves the property active and supplies a
+shared PDR code. Requesters can track/cancel their pending request; the protected
+platform portal has a Deletion requests tab for approval/rejection. Approval
+archives with Restore and preserves hotel records/staff memberships. It rechecks
+current requester authority/ownership and uses the shared property guard,
+optimistic versions, typed name confirmation and transactional actor audits.
+Duplicate pending requests and repeated/racing decisions are blocked. Rename
+remains directly available in Owner/Admin Settings and the platform portal.
+All 246 backend tests, frontend typecheck/browser flows and 65 MongoDB smoke
+checks passed with disposable fixture cleanup. No real property was archived.
+See [workflow, limits and acceptance tests](property-deletion-requests.md).
+
+## Platform property management: 2026-10-28
+
+The protected PMS owner portal now lists property metadata across all accounts
+and supports Rename, Archive and Restore. Rename preserves permanent IDs and
+linked records. Archive denies property access and retains data/memberships;
+Restore reopens the same hotel. Archived hotels still consume the owner's
+approved allowance. Reasons, typed archive/restore confirmations, optimistic
+versions and actor audit records protect changes. Archive also locks the shared
+inventory guard to stop guarded saves after archiving. No real property was
+renamed or archived during implementation. All 244 backend tests, frontend
+typecheck and 43 MongoDB smoke checks passed with disposable fixture cleanup.
+Cached names and preexisting fixed email branding can require refresh/manual
+template correction. Hotel-owner rename/archive request approvals are a later
+stage; the existing settings name editor is unchanged. See
+[workflow, limitations and tests](property-creation-approval.md#platform-property-management-2026-10-28).
+
+## Property creation approval: 2026-10-28
+
+Unauthorised account-level property creation is now blocked. A new requester
+page and protected PMS owner portal share random reference codes, contact/
+business details and approved total property limits. Zero is the default quota;
+hotel Owner/Admin roles do not authorize creation or platform review. Approvals
+and creation serialize on the account document, preventing concurrent final-slot
+overruns. Existing hotel access is retained. The explicitly nominated platform
+account is provisioned separately from hotel roles. All 242 backend tests,
+frontend typecheck/browser flows and 26 MongoDB-backed approval checks passed,
+with disposable fixture cleanup verified. This is manual platform authorization,
+not subscription billing. See [workflow, provisioning and tests](property-creation-approval.md).
+
+## Housekeeping action attribution: 2026-10-28
+
+UX follow-up: Activity and room history now group each cleaning job into one
+card with Requested by, Assigned by, Started by and Completed by visible
+together; claim/inspection rows appear when recorded. Full activity expands to
+the individual events. Filters retain the full matching job context. Grouping
+uses room identity and workflow boundaries rather than reused task IDs, and
+missing historical steps are not inferred. Six frontend grouping tests,
+TypeScript and isolated desktop/mobile browser checks passed.
+
+The shared Activity timeline and per-room history now separate the acting
+account from the assigned attendant. Request/assign/claim/start/complete/inspect
+entries show the recorded name, role and timestamp, with extra notes/status
+changes under Details. New self-claims persist claimed events and action role
+snapshots come from authenticated property access. Historical missing roles and
+old claims recorded as assigned are not inferred or rewritten. Full backend
+suite (240 tests), frontend typecheck and isolated browser checks passed. See
+[attribution behavior and acceptance tests](housekeeping-role.md#activity-who-performed-each-action-2026-10-28).
+
+## Housekeeping automatic updates: 2026-10-28
+
+Owner/Admin and Front Desk Board/Information now poll visible screens every 30
+seconds; Information includes reservations as well as housekeeping records.
+The employee Dashboard/Board uses the same hidden-tab, single-read and save
+coordination safeguards. Open forms/filters persist, stale route reads abort,
+and temporary background errors retain displayed data with a warning. Duplicate
+app-shell bootstrap reads are skipped on housekeeping routes. Frontend typecheck
+and isolated browser polling/visibility/save/error checks passed; live acceptance
+remains local. Today/business-date behavior is unchanged. See
+[automatic updates and tests](housekeeping-role.md#automatic-updates-2026-10-28).
+
+## Housekeeping dashboard update: 2026-10-28
+
+Owner/Admin and Front Desk can now read cleaning completion notes in the board's
+Activity tab and per-room history in the Assign drawer. The frontend maps notes
+from the cleaning-completed activity snapshot, preserves line breaks and hides
+blank/legacy notes; the backend already saved and returned these notes. Personal
+Housekeeping history and team-view privacy remain unchanged.
+
+Dashboard now has a separate overview of pending requests, personal assigned/
+active work and read-only Team assignments showing who is handling other rooms.
+The team API projection is property-scoped and omits other employees' notes and
+contacts; existing own-task mutation restrictions still apply. The Housekeeping
+Board retains the cleaning controls and personal history. Data refreshes every
+30 seconds or manually. The shared list covers up to 100 current assignments,
+not historical acceptance/completion records. See [usage and testing](housekeeping-role.md).
+
+## Housekeeping role update: 2026-10-27
+
+Housekeeping is now a property-scoped login role linked to one active attendant.
+Its personal dashboard shows unassigned requests, own assignments, active work
+and immutable completion history. Employees can claim/start/complete their own
+tasks; other departments' data and inspection/assignment administration remain
+blocked on the backend and frontend. One cleaning job per attendant is enforced
+within the existing transaction guard. Owner/Admin can grant and edit the login
+link. All 240 backend tests and frontend TypeScript checks passed; automated API
+tests use isolated model fixtures, and live database acceptance remains a manual
+check. See [setup, limits and testing](housekeeping-role.md).
+
+## Housekeeping request and assignment update: 2026-10-27 (preceding stage)
+
+The user clarified "Manager" means Administrator. Owner/Admin can create
+attendants; Owner/Admin/Front Desk can request housekeeping and directly assign
+available active attendants. A persisted unassigned Requests queue records
+priority, notes and requester. Busy checks prevent one attendant cleaning two
+rooms at once, while several queued assignments remain allowed. These checks
+run within the property transaction guard. Duplicate UI actions are locked and
+conflicts refresh the board. No Manager/Housekeeping login role, self-claim UI,
+occupied-room service workflow or new notification category was introduced.
+See [workflow and tests](front-desk-role.md#housekeeping-requests-and-available-attendants-2026-10-27).
+
+## Front Desk notification update: 2026-10-27
+
+Front Desk now has the notification bell for new bookings, reservation-linked
+invoices and posted guest payments. Server-side filtering precedes pagination
+and unread counts; hidden financial sources are not queried for Front Desk.
+Read state is account/property scoped and Front Desk mark-all does not consume
+the six hidden categories. Booking/invoice notification reference links remain
+within permitted workspaces. Same-invoice invoice/payment alerts explicitly
+reopen and reload the active module rather than relying on a no-op same-URL
+router push. Other notification categories and lifecycle/
+housekeeping event alerts have not been added. See [notification usage and tests](front-desk-role.md#front-desk-notification-bell-2026-10-27).
+
+## Front Desk housekeeping and checkout update: 2026-10-27
+
+Front Desk can assign existing active housekeeping attendants without creating
+staff or completing cleaning/inspection. Checkout now has a recorded-charge
+review and a server-side settlement guard for all roles. Guest invoice payments
+are available from the review. Invoice/credit/refund writes share the inventory
+transaction guard to serialize billing changes with checkout. Legacy financial
+reconciliation, unrecorded services and on-account checkout policies are not
+automatically resolved by this change. See [usage, safety and verification](front-desk-role.md#housekeeping-assignment-and-checkout-review-2026-10-27).
+
+## Front Desk role update: 2026-10-23
+
+A property-scoped Front Desk role now has backend API restrictions, filtered
+navigation, blocked direct links, operational overview/read-only reference
+pages and limited invoice payment actions. Booking saves validate Front Desk
+prices against server quotes and protect paid totals, approved overrides and
+agent terms. Restricted financial, settings, channel and Night Audit operations
+remain blocked. Existing unrestricted roles retain their previous access.
+See [Front Desk permissions and acceptance tests](front-desk-role.md).
+
+At this stage Manager, Housekeeping, Finance and Reports remained pending;
+Housekeeping is superseded by the update above. The older
+pricing-enforcement audit finding is not marked fixed for unrestricted roles.
+
+## Owner/Admin access foundation update: 2026-10-23
+
+Existing property owners retain access. Owners can now appoint property-scoped
+administrators; administrators manage operations and general member access.
+Only owners manage administrator appointments/removal and plan/trial metadata.
+Staff grants, role changes and revocations are transactional and audited.
+The frontend Access panel and property role labels use backend roles and
+permissions. Public registration cannot self-assign property privileges.
+Signup now collects name, email, password and mobile only; employee numbers
+are optional in the account model and existing values are preserved. New
+accounts start without property access and create or join a property afterward.
+
+General members retain their broad existing operational access. The five
+department roles, employee/login linkage, subscription billing and property
+limits remain unfinished. See [Owner/Admin access and testing](owner-admin-access.md).
+The findings below remain a historical baseline unless explicitly superseded.
+
 ## Occupied/future-booked room safeguards update: 2026-10-16
 
 Room catalog mutations now reject unsafe occupied-room transitions, manual

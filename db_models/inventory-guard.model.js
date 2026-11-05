@@ -4,7 +4,8 @@ const mongoose = require("mongoose");
 // index is the lock key; no TTL or application-server-local mutex is involved.
 const schema = new mongoose.Schema({
   _id: { type: String, required: true },
-  revision: { type: Number, required: true, default: 0 }
+  revision: { type: Number, required: true, default: 0 },
+  property_archived: { type: Boolean, default: false }
 }, { versionKey: false });
 
 module.exports = mongoose.models.InventoryGuard ||

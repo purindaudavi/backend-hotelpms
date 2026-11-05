@@ -2,15 +2,11 @@ const express = require("express");
 const mongoose = require("mongoose");
 const ChannelConnectionRequest = require("../db_models/channel-connection-request.model");
 const { notifyReviewTeam } = require("../services/channel-request-email.service");
+const { requirePropertyPermission } = require("../services/property-permissions.service");
 
 const router = express.Router();
 
-router.use((req, res, next) => {
-  if (req.propertyRole !== "owner") {
-    return res.status(403).json({ message: "Only the property owner can manage channel setup requests." });
-  }
-  return next();
-});
+router.use(requirePropertyPermission("channels.manage"));
 
 router.get("/", asyncHandler(async (req, res) => {
   const requests = await ChannelConnectionRequest.find({

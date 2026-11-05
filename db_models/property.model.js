@@ -243,6 +243,15 @@ const PropertySchema = new mongoose.Schema(
     },
     owner_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
     member_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    // Administrators must also be property members. Membership remains the
+    // access boundary so stale administrator IDs can never restore access.
+    administrator_ids: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    staff_roles: { type: [new mongoose.Schema({
+      user_id: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+      role: { type: String, enum: ["front_desk", "housekeeping", "finance"], required: true },
+      run_night_audit: { type: Boolean, default: false, validate: { validator: function(value) { return !value || this.role === "front_desk"; }, message: "Only Front Desk staff can receive delegated Night Audit permission." } },
+      attendant_id: { type: mongoose.Schema.Types.ObjectId, ref: "HousekeepingAttendant", required: false }
+    }, { _id: false })], default: [] },
     info: {
       type: PropertyInfoSchema,
       required: [true, "Property information is required."]
@@ -260,6 +269,9 @@ const PropertySchema = new mongoose.Schema(
       default: "active",
       index: true
     },
+    platform_archived_at: { type: Date, default: null },
+    platform_archived_by: { type: ActorSchema, default: () => ({}) },
+    platform_archive_reason: { type: String, trim: true, maxlength: 1000, default: "" },
     business_date: {
       type: Date,
       required: false,
@@ -436,6 +448,27 @@ PropertyImageSchema.index({ property_id: 1, image_type: 1, is_primary: 1, sort_o
 
 PropertySchema.pre("validate", function normalizeProperty() {
   this.property_id = String(this.property_id || "").trim();
+  const staffIds = new Set();
+  const linkedAttendants = new Set();
+  for (const assignment of this.staff_roles || []) {
+    const id = String(assignment.user_id);
+    if (staffIds.has(id) || id === String(this.owner_id) ||
+        !(this.member_ids || []).some((memberId) => String(memberId) === id) ||
+        (this.administrator_ids || []).some((adminId) => String(adminId) === id)) {
+      this.invalidate("staff_roles", "Staff roles require unique non-administrator property members.");
+    }
+    staffIds.add(id);
+    if (assignment.role === "housekeeping") {
+      const attendantId = String(assignment.attendant_id || "");
+      if (!attendantId || linkedAttendants.has(attendantId)) this.invalidate("staff_roles", "Housekeeping users require different linked attendant records.");
+      linkedAttendants.add(attendantId);
+    } else if (assignment.attendant_id) this.invalidate("staff_roles", "Only Housekeeping users can have an attendant link.");
+  }
+  if ((this.administrator_ids || []).some((id) =>
+    !(this.member_ids || []).some((memberId) => String(memberId) === String(id)) ||
+    String(id) === String(this.owner_id))) {
+    this.invalidate("administrator_ids", "Administrators must be non-owner property members.");
+  }
   if (!this.info) return;
   this.info.hotel_name = collapseWhitespace(this.info.hotel_name);
   this.info.pms_name = collapseWhitespace(this.info.pms_name);

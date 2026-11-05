@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const InventoryGuard = require("../db_models/inventory-guard.model");
 
-async function withInventoryTransaction(propertyId, work) {
+async function withInventoryTransaction(propertyId, work, { allowArchivedProperty = false } = {}) {
   if (typeof propertyId !== "string" || !propertyId.trim() || propertyId.length > 100) {
     throw Object.assign(new Error("A property ID is required to protect inventory."), { statusCode: 400 });
   }
@@ -11,7 +11,7 @@ async function withInventoryTransaction(propertyId, work) {
   // to insert this same unique _id; that duplicate only means it already exists.
   try {
     await InventoryGuard.updateOne(
-      { _id: propertyId }, { $setOnInsert: { revision: 0 } },
+      { _id: propertyId }, { $setOnInsert: { revision: 0, property_archived: false } },
       { upsert: true, writeConcern: { w: "majority" }, maxTimeMS: 10000 }
     );
   } catch (error) {
@@ -26,10 +26,10 @@ async function withInventoryTransaction(propertyId, work) {
       // A concurrent writer conflicts here. The driver retries the entire
       // callback with a fresh snapshot after the winning transaction commits.
       const result = await InventoryGuard.updateOne(
-        { _id: propertyId }, { $inc: { revision: 1 } }, { session }
+        { _id: propertyId, ...(!allowArchivedProperty ? { property_archived: { $ne: true } } : {}) }, { $inc: { revision: 1 } }, { session }
       );
       if (result.matchedCount !== 1) {
-        throw Object.assign(new Error("Inventory protection is unavailable. Please try again."), { statusCode: 503 });
+        throw Object.assign(new Error("Property inventory is unavailable. The property may be archived; refresh your property list and try again."), { statusCode: 503 });
       }
       return work(session);
     }, {

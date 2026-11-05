@@ -10,6 +10,8 @@ const Guest = require("../db_models/guest.model");
 const RoomType = require("../db_models/rooms.model");
 const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const { bookingValidationMessage } = require("../services/booking-validation-message.service");
+const { enforceFrontDeskBookingRules, enforceFrontDeskPaymentCurrency } = require("../services/front-desk-booking.service");
+const { getCheckoutReview, assertCheckoutSettled } = require("../services/checkout-review.service");
 const { moveInHouseRooms, preserveAssignmentMetadata } = require("../services/room-move.service");
 const {
   actorFromRequest,
@@ -76,6 +78,7 @@ const BLOCK_EDIT_FIELDS = [
 ];
 
 // Reservations
+const { billingReservation } = require("../services/finance-role.service");
 
 router.get("/reservations", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
@@ -126,7 +129,7 @@ router.get("/reservations", asyncHandler(async (req, res) => {
     total,
     page,
     pages: Math.max(1, Math.ceil(total / limit)),
-    reservations: reservations.map(
+    reservations: reservations.map(req.propertyRole === "finance" ? billingReservation :
       req.query.details === "true"
         ? serializeReservation
         : serializeReservationSummary
@@ -156,6 +159,7 @@ router.post("/reservations", asyncHandler(async (req, res) => {
       reservation.status = initialStatus;
     }
 
+    await enforceFrontDeskBookingRules({ role: req.propertyRole, reservation, session });
     await applyReservationMealAllocationSnapshots({
       reservation,
       requireConfigured: true,
@@ -201,6 +205,10 @@ router.get("/reservations/:reservationId", asyncHandler(async (req, res) => {
   const reservation = await findReservation(req);
   if (!reservation) {
     return res.status(404).json({ message: "Reservation not found." });
+  }
+  if (req.propertyRole === "finance") {
+    const payments = await ReservationPayment.find({ property_id: reservation.property_id, reservation_id: reservation._id }).sort({ posted_at: -1 });
+    return res.json({ reservation: billingReservation(reservation), payments, logs: [], attachments: [] });
   }
 
   const [logs, attachments, payments] = await Promise.all([
@@ -312,6 +320,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
     const before = record.toObject({ virtuals: false });
     applyFields(record, req.body || {}, RESERVATION_EDIT_FIELDS);
     preserveAssignmentMetadata(before, record);
+    await enforceFrontDeskBookingRules({ role: req.propertyRole, reservation: record, previous: before, session });
     record.updated_by = actor;
     await applyReservationMealAllocationSnapshots({
       reservation: record,
@@ -449,6 +458,12 @@ router.post("/reservations/:reservationId/check-in", asyncHandler(async (req, re
   });
 }));
 
+router.get("/reservations/:reservationId/checkout-review", asyncHandler(async (req, res) => {
+  const record = await findReservation(req);
+  if (!record) throw notFound("Reservation not found.");
+  res.json(await getCheckoutReview(record));
+}));
+
 router.post("/reservations/:reservationId/check-out", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
   const reservation = await inTransaction(req, async (session) => {
@@ -457,6 +472,12 @@ router.post("/reservations/:reservationId/check-out", asyncHandler(async (req, r
     if (record.status !== "checked_in") {
       throw conflict("Only a checked-in reservation can be checked out.");
     }
+    const review = await getCheckoutReview(record, session);
+    assertCheckoutSettled(review);
+    // Payments may have been posted from the review's invoice drawer after the
+    // reservation editor loaded. Do not retain a stale browser-paid summary.
+    record.financial_summary.paid_total = review.totals_by_currency
+      .find((group) => group.currency === String(record.currency).toUpperCase())?.paid || 0;
     await releaseAssignedRoomsAfterCheckout(record, {
       session,
       actor,
@@ -649,6 +670,7 @@ router.post("/reservations/:reservationId/payments", asyncHandler(async (req, re
   const payment = await inTransaction(req, async (session) => {
     const reservation = await findReservation(req, session);
     if (!reservation) throw notFound("Reservation not found.");
+    enforceFrontDeskPaymentCurrency(req.propertyRole, req.body?.currency, reservation.currency);
     const status = normalizeEnum(req.body?.status) || "posted";
     if (!["posted", "refunded"].includes(status)) {
       throw badRequest("A new payment status must be posted or refunded.");
@@ -1337,7 +1359,7 @@ router.use((error, _req, res, _next) => {
     });
   }
   if (error.statusCode) {
-    return res.status(error.statusCode).json({ message: error.message });
+    return res.status(error.statusCode).json({ message: error.message, ...(typeof error.code === "string" ? { code: error.code } : {}) });
   }
   console.error(error);
   return res.status(500).json({

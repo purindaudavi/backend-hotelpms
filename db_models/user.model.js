@@ -29,13 +29,18 @@ const userSchema = new mongoose.Schema(
         },
         emp_no: {
             type: String,
-            required: true,
+            trim: true,
+            default: '',
         },
         mobile: {
             type: String,
             required: true,
             maxlength: 15
-        }
+        },
+        // Platform privileges and creation quotas are never accepted at signup.
+        platform_owner: { type: Boolean, default: false },
+        property_creation_limit: { type: Number, min: 0, max: 1000, default: 0, validate: Number.isInteger },
+        property_creation_revision: { type: Number, default: 0 }
 
     },
     {

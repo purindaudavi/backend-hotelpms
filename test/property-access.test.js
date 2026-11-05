@@ -10,7 +10,7 @@ const RoomType = require("../db_models/rooms.model");
 const Guest = require("../db_models/guest.model");
 const AuditLog = require("../db_models/booking-log.model");
 
-const owner = { _id: new mongoose.Types.ObjectId(), role: "user", name: "Owner", email: "owner@example.test" };
+const owner = { _id: new mongoose.Types.ObjectId(), role: "user", name: "Owner", email: "owner@example.test", property_creation_limit: 3 };
 const member = { _id: new mongoose.Types.ObjectId(), role: "user", name: "Member", email: "member@example.test" };
 const outsider = { _id: new mongoose.Types.ObjectId(), role: "admin", name: "Other owner", email: "other@example.test" };
 
@@ -43,6 +43,8 @@ test("HTTP property creation, listing, grants, revocation and cross-hotel denial
   const properties = [];
   const users = [owner, member, outsider];
   t.mock.method(User, "findById", (id) => query(users.find((user) => String(user._id) === String(id))));
+  t.mock.method(User, "findOneAndUpdate", (filter) => query(users.find((user) => String(user._id) === String(filter._id))));
+  t.mock.method(Property, "countDocuments", (filter) => query(properties.filter(property => String(property.owner_id) === String(filter.owner_id)).length));
   t.mock.method(User, "findOne", (filter) => query(users.find((user) => user.email === filter.email)));
   t.mock.method(User, "find", (filter) => query(users.filter((user) => filter._id.$in.some((id) => String(id) === String(user._id)))));
   t.mock.method(Property, "findOne", (filter) => query(properties.find((property) => property.property_id === filter.property_id) || null));
@@ -57,6 +59,7 @@ test("HTTP property creation, listing, grants, revocation and cross-hotel denial
   });
   t.mock.method(RoomType, "find", () => query([]));
   t.mock.method(AuditLog, "create", async (values) => values);
+  t.mock.method(require("../db_models/inventory-guard.model"), "updateOne", async () => ({ matchedCount: 1 }));
   t.mock.method(mongoose, "startSession", async () => ({ withTransaction: async (work) => work(), endSession: async () => {} }));
   let guestQuery;
   t.mock.method(Guest, "findOne", (filter) => { guestQuery = filter; return query(null); });
@@ -113,14 +116,16 @@ test("HTTP property creation, listing, grants, revocation and cross-hotel denial
   assert.equal((await request(owner, "/rooms")).status, 400, "unscoped operational requests must fail");
   await request(owner, `/guests/${new mongoose.Types.ObjectId()}?property_id=hotel-test`);
   assert.equal(guestQuery.property_id, "hotel-test", "record-ID lookups must also be property scoped");
-  let registeredRole;
-  t.mock.method(User.prototype, "save", async function () { await this.validate(); registeredRole = this.role; users.push(this); return this; });
+  let registeredRole, registeredEmployeeNumber;
+  t.mock.method(User.prototype, "save", async function () { await this.validate(); registeredRole = this.role; registeredEmployeeNumber = this.emp_no; users.push(this); return this; });
   t.mock.method(Session, "create", async (values) => values);
   const registered = await request(null, "/auth/register", { method: "POST", body: JSON.stringify({
-    name: "New account", email: "new@example.test", password: "test-password-123", role: "admin", emp_no: "02", mobile: "0771234567"
+    name: "New account", email: "new@example.test", password: "test-password-123", role: "admin", mobile: "0771234567"
   }) });
   assert.equal(registered.status, 201);
   assert.equal(registeredRole, "user", "public registration cannot grant access to legacy hotels");
+  assert.equal(registeredEmployeeNumber, "", "registration does not require an employee number");
+  assert.deepEqual((await (await request(users.at(-1), "/properties")).json()).properties, [], "a new account starts with no assigned properties");
   const signedIn = await request(null, "/auth/login", { method: "POST", body: JSON.stringify({
     email: "new@example.test", password: "test-password-123"
   }) });

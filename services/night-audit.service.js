@@ -248,10 +248,11 @@ function serializeNightAudit(audit, snapshot, steps) {
     close_summary: audit.close_summary,
     closed_at: audit.closed_at,
     closed_by: audit.closed_by,
+    ...financeReviewFields(audit),
     next_business_date: audit.next_business_date ? dateKey(audit.next_business_date) : "",
     snapshot,
     steps,
-    can_complete: nightAuditCanComplete(steps),
+    can_complete: audit.status === "open" && nightAuditCanComplete(steps),
     blockers: unresolvedBlockers(steps)
   };
 }
@@ -269,6 +270,12 @@ function finalizeStep(item, audit) {
   else if (reviewed) status = "done";
   else if (warnings.length) status = "warning";
   return { ...item, exceptions, status };
+}
+
+function financeReviewFields(audit) {
+  return { version: audit.version || 0, finance_review_status: audit.finance_review_status || "pending_review",
+    finance_review_note: audit.finance_review_note || "", finance_reviewed_by: audit.finance_reviewed_by,
+    finance_reviewed_at: audit.finance_reviewed_at, finance_review_history: audit.finance_review_history || [] };
 }
 
 function step({ id, title, description, metric, required = true, disabled = false, exceptions = [] }) {
@@ -345,6 +352,7 @@ function httpError(statusCode, message, code = "NIGHT_AUDIT_REQUEST_INVALID") {
 }
 
 module.exports = {
+  financeReviewFields,
   addDays,
   buildNightAuditSnapshot,
   buildNightAuditSteps,

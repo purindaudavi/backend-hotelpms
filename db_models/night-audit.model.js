@@ -76,6 +76,16 @@ const NightAuditSchema = new mongoose.Schema(
     close_summary: { type: mongoose.Schema.Types.Mixed, default: undefined },
     closed_at: { type: Date, required: false },
     closed_by: { type: ActorSchema, required: false },
+    finance_review_status: { type: String, enum: ["pending_review", "reviewed", "flagged"], default: "pending_review" },
+    finance_review_note: { type: String, trim: true, maxlength: 3000, default: "" },
+    finance_reviewed_by: { type: ActorSchema, required: false },
+    finance_reviewed_at: { type: Date, required: false },
+    finance_review_history: { type: [new mongoose.Schema({
+      status: { type: String, enum: ["reviewed", "flagged"], required: true },
+      note: { type: String, trim: true, maxlength: 3000, default: "" },
+      actor: { type: ActorSchema, required: true },
+      at: { type: Date, required: true }
+    }, { _id: false })], default: [] },
     next_business_date: { type: Date, required: false },
     created_by: { type: ActorSchema, default: () => ({}) },
     updated_by: { type: ActorSchema, default: () => ({}) }

@@ -1,5 +1,6 @@
 const express = require("express");
 const mongoose = require("mongoose");
+const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const CreditNote = require("../db_models/credit-note.model");
 const Invoice = require("../db_models/invoice.model");
 const BookingAuditLog = require("../db_models/booking-log.model");
@@ -59,7 +60,7 @@ router.get("/", asyncHandler(async (req, res) => {
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const invoice = await Invoice.findOne({
       _id: objectId(req.body?.invoice_id, "invoice_id"),
       property_id: propertyId
@@ -137,7 +138,7 @@ router.get("/:creditNoteId", asyncHandler(async (req, res) => {
 
 router.patch("/:creditNoteId", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const credit = await inTransaction(async (session) => {
+  const credit = await inTransaction(req, async (session) => {
     const record = await findCredit(req, session);
     if (!record) throw notFound("Credit note not found.");
     if (record.status !== "draft") throw conflict("Only a draft credit note can be edited.");
@@ -175,7 +176,7 @@ router.patch("/:creditNoteId", asyncHandler(async (req, res) => {
 
 router.post("/:creditNoteId/issue", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const credit = await findCredit(req, session);
     if (!credit) throw notFound("Credit note not found.");
     if (credit.status !== "draft") throw conflict("Only a draft credit note can be issued.");
@@ -244,7 +245,7 @@ router.post("/:creditNoteId/void", asyncHandler(async (req, res) => {
   const reason = String(req.body?.reason || "").trim();
   if (!reason) throw badRequest("Void reason is required.");
   const actor = actorFromRequest(req);
-  const result = await inTransaction(async (session) => {
+  const result = await inTransaction(req, async (session) => {
     const credit = await findCredit(req, session);
     if (!credit) throw notFound("Credit note not found.");
     if (credit.status === "voided") throw conflict("This credit note is already voided.");
@@ -418,15 +419,8 @@ function asyncHandler(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
-async function inTransaction(work) {
-  const session = await mongoose.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => { result = await work(session); });
-    return result;
-  } finally {
-    await session.endSession();
-  }
+function inTransaction(req, work) {
+  return withInventoryTransaction(requirePropertyId(req), work);
 }
 
 function financialErrorHandler(error, _req, res, _next) {

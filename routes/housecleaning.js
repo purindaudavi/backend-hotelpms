@@ -2,6 +2,8 @@ const express = require("express");
 const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
 const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { requirePropertyPermission } = require("../services/property-permissions.service");
+const { linkedAttendant, assertOwnTask, myWork, projectTask } = require("../services/housekeeping-work.service");
 const BookingAuditLog = require("../db_models/booking-log.model");
 const {
   HousekeepingTask,
@@ -15,6 +17,31 @@ const {
 } = require("../services/booking-audit.service");
 
 const router = express.Router();
+
+router.get("/my-work", requirePropertyPermission("housekeeping.self.read"), asyncHandler(async (req, res) => {
+  res.json(await myWork(req, requirePropertyId(req)));
+}));
+
+router.get("/attendants", requirePropertyPermission("housekeeping.staff.manage"), asyncHandler(async (req, res) => {
+  const attendants = await HousekeepingAttendant.find({ property_id: requirePropertyId(req) }).select("name employee_number status").sort({ name: 1 }).lean();
+  res.json({ attendants });
+}));
+
+router.post("/rooms/:physicalRoomId/claim", requirePropertyPermission("housekeeping.self.manage"), asyncHandler(async (req, res) => {
+  const propertyId = requirePropertyId(req);
+  const result = await mutateRoomTask(req, propertyId, async ({ room, roomType, task, actor, session }) => {
+    const { attendant } = await linkedAttendant(req, propertyId, session);
+    assertRoomCanBeServiced(room);
+    if (task.status !== "requested" || task.attendant?.attendant_id) throw httpError(409, "This request has already been assigned or is no longer available. Refresh your tasks.");
+    await assertAttendantAvailable(attendant, propertyId, room._id, session);
+    const before = task.toObject();
+    task.status = "assigned"; task.attendant = attendantSnapshot(attendant); task.assigned_at = new Date(); task.updated_by = actor;
+    await task.save({ session });
+    await recordAction({ req, propertyId, roomType, room, task, actor, session, action: "claimed", fromStatus: "requested", toStatus: "assigned",
+      description: `${attendant.name} claimed the housekeeping request for room ${room.room_number}.`, changes: changesFromPayload(before, task.toObject(), ["status", "attendant"]) });
+  });
+  res.json({ message: "Request assigned to you.", ...result });
+}));
 
 router.get("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
@@ -32,7 +59,12 @@ router.get("/", asyncHandler(async (req, res) => {
     rooms: roomTypes.flatMap((roomType) => roomType.physical_rooms
       .filter((room) => room.active)
       .map((room) => serializeRoom(roomType, room, taskByRoom.get(String(room._id))))),
-    attendants,
+    attendants: attendants.map((attendant) => {
+      const assigned = tasks.filter((task) => String(task.attendant?.attendant_id) === String(attendant._id));
+      const working = assigned.filter((task) => task.status === "in_progress");
+      return { ...attendant.toObject(), available: attendant.status === "active" && !working.length,
+        busy_rooms: working.map((task) => task.room_number), queued_rooms: assigned.filter((task) => task.status === "assigned").map((task) => task.room_number) };
+    }),
     activities
   });
 }));
@@ -56,7 +88,7 @@ router.get("/audit-log", asyncHandler(async (req, res) => {
   return res.status(200).json({ count: logs.length, logs });
 }));
 
-router.post("/attendants", asyncHandler(async (req, res) => {
+router.post("/attendants", requirePropertyPermission("housekeeping.staff.manage"), asyncHandler(async (req, res) => {
   const attendant = new HousekeepingAttendant({
     property_id: requirePropertyId(req),
     employee_number: req.body?.employee_number,
@@ -72,7 +104,7 @@ router.post("/attendants", asyncHandler(async (req, res) => {
   return res.status(201).json({ message: "Housekeeping attendant created successfully.", attendant });
 }));
 
-router.patch("/attendants/:attendantId", asyncHandler(async (req, res) => {
+router.patch("/attendants/:attendantId", requirePropertyPermission("housekeeping.staff.manage"), asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const attendant = await requireAttendant(req.params.attendantId, propertyId);
   if (req.body?.version !== undefined && Number(req.body.version) !== attendant.version) {
@@ -86,20 +118,47 @@ router.patch("/attendants/:attendantId", asyncHandler(async (req, res) => {
   return res.status(200).json({ message: "Housekeeping attendant updated successfully.", attendant });
 }));
 
-router.post("/rooms/:physicalRoomId/assign", asyncHandler(async (req, res) => {
+router.post("/rooms/:physicalRoomId/request", requirePropertyPermission("housekeeping.request"), asyncHandler(async (req, res) => {
+  const propertyId = requirePropertyId(req);
+  const result = await mutateRoomTask(req, propertyId, async ({ roomType, room, task, actor, session }) => {
+    assertRoomCanBeServiced(room);
+    if (room.housekeeping_status === "in_progress" || task.status === "in_progress") throw httpError(409, `Room ${room.room_number} is already being cleaned. Refresh the board.`);
+    if (task.status === "requested" || (task.status === "assigned" && task.attendant?.attendant_id)) throw httpError(409, `Room ${room.room_number} already has a pending request or assignment. Refresh the board.`);
+    const before = task.toObject();
+    task.status = "requested";
+    task.attendant = {};
+    task.priority = normalizePriority(req.body?.priority || "normal");
+    task.notes = req.body?.notes || "";
+    task.requested_at = new Date(); task.requested_by = actor; task.updated_by = actor;
+    task.assigned_at = null; task.started_at = null; task.completed_at = null; task.inspected_at = null;
+    room.housekeeping_status = "dirty";
+    await roomType.save({ session }); await task.save({ session });
+    await recordAction({ req, propertyId, roomType, room, task, actor, session, action: "requested", fromStatus: before.status, toStatus: "requested",
+      description: `Housekeeping requested for room ${room.room_number}. Awaiting an attendant assignment.`,
+      changes: changesFromPayload(before, task.toObject(), ["status", "priority", "notes", "requested_at", "attendant"]) });
+  });
+  res.status(201).json({ message: "Housekeeping requested. The room is waiting for an attendant assignment.", ...result });
+}));
+
+router.post("/rooms/:physicalRoomId/assign", requirePropertyPermission("housekeeping.assign"), asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const attendantId = objectId(req.body?.attendant_id, "attendant_id");
   const result = await mutateRoomTask(req, propertyId, async ({ roomType, room, task, actor, session }) => {
     assertRoomCanBeServiced(room);
+    if (room.housekeeping_status === "in_progress" || task.status === "in_progress") throw httpError(409, `Room ${room.room_number} is being cleaned. Finish the current task before reassigning it.`);
     const attendant = await requireAttendant(attendantId, propertyId, session);
     if (attendant.status !== "active") throw httpError(409, "Only an active attendant can be assigned.");
+    await assertAttendantAvailable(attendant, propertyId, room._id, session);
     const before = task.toObject();
     task.attendant = attendantSnapshot(attendant);
     task.priority = normalizePriority(req.body?.priority || task.priority);
     if (Object.prototype.hasOwnProperty.call(req.body || {}, "notes")) task.notes = req.body.notes;
-    if (["completed", "inspected"].includes(task.status)) task.status = "assigned";
+    task.status = "assigned";
+    task.started_at = null; task.completed_at = null; task.inspected_at = null;
+    room.housekeeping_status = "dirty";
     task.assigned_at = new Date();
     task.updated_by = actor;
+    await roomType.save({ session });
     await task.save({ session });
     await recordAction({
       req, propertyId, roomType, room, task, actor, session,
@@ -114,11 +173,14 @@ router.post("/rooms/:physicalRoomId/assign", asyncHandler(async (req, res) => {
 
 router.post("/rooms/:physicalRoomId/start", asyncHandler(async (req, res) => {
   const result = await mutateRoomTask(req, requirePropertyId(req), async ({ roomType, room, task, actor, session, propertyId }) => {
+    await assertOwnTask(req, propertyId, task, session);
+    if (req.propertyRole === "housekeeping" && task.status !== "assigned") throw httpError(409, "Only an assigned task can be started. Refresh your tasks.");
     assertRoomCanBeServiced(room);
     if (!["dirty", "clean"].includes(room.housekeeping_status)) {
-      throw httpError(409, `Room ${room.room_number} cannot start cleaning from ${room.housekeeping_status}.`);
+      throw httpError(409, `Room ${room.room_number} cannot start cleaning now. It may already be in progress; refresh the board.`);
     }
-    await requireActiveAssignedAttendant(task, propertyId, session);
+    const attendant = await requireActiveAssignedAttendant(task, propertyId, session);
+    await assertAttendantAvailable(attendant, propertyId, room._id, session);
     const before = task.toObject();
     const previousRoomStatus = room.housekeeping_status;
     room.housekeeping_status = "in_progress";
@@ -142,9 +204,11 @@ router.post("/rooms/:physicalRoomId/start", asyncHandler(async (req, res) => {
 
 router.post("/rooms/:physicalRoomId/complete", asyncHandler(async (req, res) => {
   const result = await mutateRoomTask(req, requirePropertyId(req), async ({ roomType, room, task, actor, session, propertyId }) => {
+    await assertOwnTask(req, propertyId, task, session);
+    if (req.propertyRole === "housekeeping" && task.status !== "in_progress") throw httpError(409, "Only your in-progress task can be completed. Refresh your tasks.");
     assertRoomCanBeServiced(room);
     if (room.housekeeping_status !== "in_progress") {
-      throw httpError(409, `Room ${room.room_number} must be in progress before it can be completed.`);
+      throw httpError(409, `Room ${room.room_number} is not currently being cleaned. It may already be completed; refresh the board.`);
     }
     await requireActiveAssignedAttendant(task, propertyId, session);
     const before = task.toObject();
@@ -212,6 +276,7 @@ async function mutateRoomTask(req, propertyId, mutation) {
     const { roomType, room } = await requirePhysicalRoom(req.params.physicalRoomId, propertyId, session);
     let task = await HousekeepingTask.findOne({ property_id: propertyId, physical_room_id: room._id }).session(session);
     if (!task) {
+      if (req.propertyRole === "housekeeping") throw httpError(404, "Housekeeping task not found.");
       task = new HousekeepingTask({
         property_id: propertyId,
         physical_room_id: room._id,
@@ -226,6 +291,7 @@ async function mutateRoomTask(req, propertyId, mutation) {
     }
     const actor = actorFromRequest(req);
     await mutation({ propertyId, roomType, room, task, actor, session });
+    if (req.propertyRole === "housekeeping") return { task: projectTask(task, room, roomType) };
     return { room: serializeRoom(roomType, room, task), task };
   });
 }
@@ -244,6 +310,7 @@ async function recordAction({ req, propertyId, roomType, room, task, actor, sess
     attendant: task.attendant,
     notes: task.notes,
     actor,
+    actor_role: req.propertyRole || "",
     request_id: requestId(req)
   }], { session });
   await writeAuditLog({
@@ -309,6 +376,14 @@ async function requireActiveAssignedAttendant(task, propertyId, session = null) 
     throw httpError(409, "The assigned housekeeping attendant is no longer active. Assign an active attendant first.");
   }
   return attendant;
+}
+
+async function assertAttendantAvailable(attendant, propertyId, roomId, session) {
+  // Every assignment/start holds the same property transaction guard, so two
+  // concurrent requests cannot both pass this availability check.
+  const busy = await HousekeepingTask.findOne({ property_id: propertyId,
+    "attendant.attendant_id": attendant._id, status: "in_progress", physical_room_id: { $ne: roomId } }).session(session);
+  if (busy) throw httpError(409, `${attendant.name} is cleaning room ${busy.room_number}. Choose an available attendant or request housekeeping instead.`);
 }
 
 function assertRoomCanBeServiced(room) {
