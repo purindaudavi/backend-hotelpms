@@ -50,7 +50,7 @@ test("housekeeping alerts isolate attendants before pagination, check claimable 
   t.mock.method(Activity, "findOne", filter => query(events.find(item => matches(item, filter)) || null));
   let financialReads = 0;
   for (const source of notificationSources) {
-    t.mock.method(source.model, "find", () => { financialReads++; return query([]); });
+    t.mock.method(source.model, "find", () => { if (source.type !== "money_request") financialReads++; return query([]); });
     t.mock.method(source.model, "findOne", () => query(null));
   }
   const states = new Map(), key = filter => `${filter.property_id}:${filter.user_id}`;

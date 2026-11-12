@@ -41,11 +41,11 @@ function mockSources(t, records) {
   return calls;
 }
 
-test("Front Desk keeps three types; Owner/Admin add housekeeping while member/demo retain nine and unknown roles fail closed", () => {
-  assert.deepEqual(notificationTypesForRole("front_desk"), ["booking", "invoice", "payment"]);
-  for (const role of ["owner", "administrator"]) assert.equal(notificationTypesForRole(role).length, 11);
-  for (const role of ["member", "demo"]) assert.equal(notificationTypesForRole(role).length, 9);
-  assert.deepEqual(notificationTypesForRole("housekeeping"), ["housekeeping_request", "housekeeping_assignment"]);
+test("staff roles add audience-scoped money requests while unknown roles fail closed", () => {
+  assert.deepEqual(notificationTypesForRole("front_desk"), ["booking", "invoice", "payment", "money_request"]);
+  for (const role of ["owner", "administrator"]) assert.equal(notificationTypesForRole(role).length, 12);
+  for (const role of ["member", "demo"]) assert.equal(notificationTypesForRole(role).length, 10);
+  assert.deepEqual(notificationTypesForRole("housekeeping"), ["housekeeping_request", "housekeeping_assignment", "money_request"]);
   for (const role of [null, undefined, "manager", "constructor"]) assert.deepEqual(notificationTypesForRole(role), []);
 });
 
@@ -56,7 +56,7 @@ test("Front Desk filtering happens before queries, pagination and unread countin
   records.invoice.push({ ...records.invoice[0], _id: makeId(), reservation_id: null });
   const feed = await listPropertyNotifications(propertyId, 100, "front_desk");
   assert.deepEqual(feed.map((item) => item.type), ["booking", "invoice", "payment"]);
-  assert.deepEqual(calls.map((call) => call.type), ["booking", "invoice", "payment"]);
+  assert.deepEqual(calls.map((call) => call.type), ["money_request", "booking", "invoice", "payment"]);
   assert.ok(calls.every((call) => call.filter.property_id === propertyId));
   assert.deepEqual((await listPropertyNotifications(propertyId, 2, "front_desk")).map((item) => item.type), ["booking", "invoice"]);
   assert.equal((await listPropertyNotifications(propertyId, 30, "unexpected")).length, 0);
@@ -123,7 +123,7 @@ test("authenticated notification API filters Front Desk, protects read state and
   assert.equal(states.has(`${propertyId}:${owner._id}`), false); // forged identity ignored
   assert.equal((await request(staff, "/read-all", "POST")).status, 200);
   const state = states.get(`${propertyId}:${staff._id}`);
-  assert.deepEqual(Object.keys(state.read_through_by_type).sort(), ["booking", "invoice", "payment"]);
+  assert.deepEqual(Object.keys(state.read_through_by_type).sort(), ["booking", "invoice", "money_request", "payment"]);
   assert.equal(state.read_through_at, undefined);
   assert.equal((await (await request(staff)).json()).unread_count, 0);
   assert.equal((await (await request(owner)).json()).unread_count, 9);

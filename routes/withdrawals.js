@@ -76,7 +76,7 @@ router.post("/", asyncHandler(async (req, res) => {
 
   const withdrawal = await withInventoryTransaction(propertyId, async (session) => {
     const { property, role } = await withdrawalProperty(req, session);
-    const pending = role === "finance";
+    const pending = role !== "owner";
     const recipient = await resolveWithdrawalRecipient(property, req.body?.recipient_user_id, session);
     const withdrawalNo = await nextDocumentNumber({
       propertyId,
@@ -146,7 +146,7 @@ router.get("/:withdrawalId", asyncHandler(async (req, res) => {
 }));
 
 router.post("/:withdrawalId/complete", asyncHandler(async (req, res) => {
-  if (!["owner", "administrator"].includes(req.propertyRole)) return res.status(403).json({ message: "Only Owner/Admin can approve and record a withdrawal." });
+  if (req.propertyRole !== "owner") return res.status(403).json({ message: "Only the Owner can approve and record a withdrawal." });
   const note = String(req.body?.note || "").trim();
   if (note.length < 5 || note.length > 1000) throw badRequest("Enter an approval note of 5-1000 characters.");
   const receivedAt = parseDate(req.body?.money_received_at, "money_received_at");
@@ -154,7 +154,7 @@ router.post("/:withdrawalId/complete", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req), propertyId = requirePropertyId(req);
   const withdrawal = await withInventoryTransaction(propertyId, async session => {
     const { property, role } = await withdrawalProperty(req, session);
-    if (!["owner", "administrator"].includes(role)) throw Object.assign(new Error("Only Owner/Admin can approve and record a withdrawal."), { statusCode: 403 });
+    if (role !== "owner") throw Object.assign(new Error("Only the Owner can approve and record a withdrawal."), { statusCode: 403 });
     const record = await findWithdrawal(req, session);
     if (!record) throw notFound("Withdrawal not found.");
     if (record.status !== "pending") throw conflict("Only a pending withdrawal can be approved.");
@@ -183,7 +183,7 @@ router.post("/:withdrawalId/void", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
   const withdrawal = await withInventoryTransaction(requirePropertyId(req), async (session) => {
     const { role } = await withdrawalProperty(req, session);
-    if (!["owner", "administrator"].includes(role)) throw Object.assign(new Error("Only Owner/Admin can reject or void a withdrawal."), { statusCode: 403 });
+    if (role !== "owner") throw Object.assign(new Error("Only the Owner can reject or void a withdrawal."), { statusCode: 403 });
     const record = await findWithdrawal(req, session);
     if (!record) throw notFound("Withdrawal not found.");
     if (record.status === "voided") throw conflict("This withdrawal is already voided.");

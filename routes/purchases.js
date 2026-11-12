@@ -24,8 +24,14 @@ router.get("/", asyncHandler(async (req, res) => {
     const pattern = new RegExp(escapeRegExp(search), "i");
     query.$or = [{ purchase_no: pattern }, { supplier_name: pattern }, { supplier_invoice_no: pattern }, { narration: pattern }];
   }
-  const purchases = await Purchase.find(query).sort({ purchase_date: -1, _id: -1 }).limit(200);
-  return res.json({ count: purchases.length, purchases: purchases.map(serializeFinancialDocument) });
+  const paginated = req.query.page !== undefined;
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, Number.parseInt(req.query.limit, 10) || 100));
+  const records = Purchase.find(query).sort({ purchase_date: -1, _id: -1 });
+  if (paginated) records.skip((page - 1) * limit);
+  const purchases = await records.limit(paginated ? limit : 200);
+  const metadata = paginated ? { total: await Purchase.countDocuments(query), page } : null;
+  return res.json({ count: purchases.length, purchases: purchases.map(serializeFinancialDocument), ...(metadata ? { ...metadata, pages: Math.max(1, Math.ceil(metadata.total / limit)) } : {}) });
 }));
 
 router.post("/", asyncHandler(async (req, res) => {
@@ -72,6 +78,18 @@ router.post("/", asyncHandler(async (req, res) => {
 
 router.post("/:purchaseId/pay", asyncHandler(async (req, res) => {
   const actor = actorFromRequest(req);
+  const method = String(req.body?.payment_method || "other").trim();
+  const isOther = normalizeEnum(method) === "other";
+  let methodDetails = "";
+  // Original Financials clients and historical records may not supply this
+  // field. When the new form supplies it for Other, require a real description.
+  if (isOther && Object.hasOwn(req.body || {}, "payment_method_details")) {
+    if (typeof req.body.payment_method_details !== "string" || !req.body.payment_method_details.trim()) {
+      throw httpError(400, "Please specify the payment method when selecting Other.");
+    }
+    methodDetails = req.body.payment_method_details.trim();
+    if (methodDetails.length > 150) throw httpError(400, "Payment method details cannot exceed 150 characters.");
+  }
   const purchase = await inTransaction(async (session) => {
     const record = await findPurchase(req, session);
     if (!record) throw httpError(404, "Purchase not found.");
@@ -79,7 +97,8 @@ router.post("/:purchaseId/pay", asyncHandler(async (req, res) => {
     record.status = "paid";
     record.paid_at = req.body?.paid_at ? parseDate(req.body.paid_at, "paid_at") : new Date();
     record.paid_by = actor;
-    record.payment_method = req.body?.payment_method || "other";
+    record.payment_method = isOther ? "other" : method;
+    record.payment_method_details = methodDetails;
     record.payment_reference = req.body?.payment_reference;
     await record.save({ session });
     await postFinancialTransaction({
@@ -92,7 +111,7 @@ router.post("/:purchaseId/pay", asyncHandler(async (req, res) => {
       accountingEffect: "decrease",
       amount: record.amount,
       currency: record.currency,
-      description: `Supplier payment for purchase ${record.purchase_no} to ${record.supplier_name}.`,
+      description: `Supplier payment for purchase ${record.purchase_no} to ${record.supplier_name}. Payment method: ${isOther && methodDetails ? `Other - ${methodDetails}` : record.payment_method.replaceAll("_", " ")}.`,
       actor,
       requestId: requestId(req),
       session

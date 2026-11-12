@@ -15,8 +15,14 @@ router.get("/", asyncHandler(async (req, res) => {
   applyDateRange(query, "expense_date", req.query.date_from, req.query.date_to);
   const search = String(req.query.search || "").trim();
   if (search) { const pattern = new RegExp(escapeRegExp(search), "i"); query.$or = [{ expense_no: pattern }, { expense_type: pattern }, { description: pattern }, { remark: pattern }]; }
-  const expenses = await Expense.find(query).sort({ expense_date: -1, _id: -1 }).limit(200);
-  return res.json({ count: expenses.length, expenses: expenses.map(serializeFinancialDocument) });
+  const paginated = req.query.page !== undefined;
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, Number.parseInt(req.query.limit, 10) || 100));
+  const records = Expense.find(query).sort({ expense_date: -1, _id: -1 });
+  if (paginated) records.skip((page - 1) * limit);
+  const expenses = await records.limit(paginated ? limit : 200);
+  const metadata = paginated ? { total: await Expense.countDocuments(query), page } : null;
+  return res.json({ count: expenses.length, expenses: expenses.map(serializeFinancialDocument), ...(metadata ? { ...metadata, pages: Math.max(1, Math.ceil(metadata.total / limit)) } : {}) });
 }));
 
 router.post("/", asyncHandler(async (req, res) => {
@@ -54,6 +60,7 @@ router.post("/:expenseId/void", asyncHandler(async (req, res) => {
     const record = await Expense.findOne({ _id: objectId(req.params.expenseId), property_id: requirePropertyId(req) }).session(session);
     if (!record) throw httpError(404, "Expense not found.");
     if (record.status === "voided") throw httpError(409, "This expense is already voided.");
+    if (record.cash_request_id) throw httpError(409, "This cost belongs to a paid money request. Its cash movement must not be voided or paid a second time here.");
     record.status = "voided"; record.voided_at = new Date(); record.voided_by = actor; record.void_reason = reason;
     await record.save({ session });
     await voidFinancialTransaction({ propertyId: record.property_id, sourceType: "expense", sourceId: record._id, reason, actor, requestId: requestId(req), voidedAt: record.voided_at, session });

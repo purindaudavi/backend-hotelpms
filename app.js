@@ -35,7 +35,7 @@ const testChannelConnectionRoutes = require("./routes/test-channel-connection");
 const channelBookingRoutes = require("./routes/channel-bookings");
 const channelConnectionRequestRoutes = require("./routes/channel-connection-requests");
 const internalChannelRequestRoutes = require("./routes/internal-channel-requests");
-const nightAuditRoutes = require("./routes/night-audit");
+const nightAuditRoutes = require("./routes/night-audit-v2");
 const emailTemplateRoutes = require("./routes/email-templates");
 const authRoutes = require("./routes/auth");
 const notificationRoutes = require("./routes/notifications");
@@ -48,6 +48,7 @@ const port = Number(process.env.PORT) || 3500;
 const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
 app.use(cors({ origin: frontendOrigin }));
+app.use("/api/money-requests", express.json({ limit: "5mb" }));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/", (_req, res) => {
@@ -90,6 +91,7 @@ app.use("/api/invoices", invoiceRoutes);
 app.use("/api/credits", creditRoutes);
 app.use("/api/refunds", refundRoutes);
 app.use("/api/withdrawals", withdrawalRoutes);
+app.use("/api/money-requests", require("./routes/money-requests"));
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/purchases", purchaseRoutes);
 app.use("/api/expenses", expenseRoutes);
@@ -106,6 +108,7 @@ app.use("/api/email-templates", emailTemplateRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/financial-targets", financialTargetRoutes);
 app.use("/api/finance", financeRoutes);
+app.use("/api/activity-logs", require("./routes/activity-logs"));
 
 app.use((error, _req, res, _next) => {
   const status = Number(error?.statusCode || error?.status || 500);

@@ -41,6 +41,8 @@ const ReportRunSchema = new mongoose.Schema(
       maxlength: 100,
       index: true
     },
+    night_audit_id: { type: mongoose.Schema.Types.ObjectId, ref: "NightAudit" },
+    rows: { type: [mongoose.Schema.Types.Mixed], default: undefined },
     report_type: {
       type: String,
       required: [true, "Report type is required."],

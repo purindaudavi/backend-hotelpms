@@ -20,12 +20,12 @@ test("Night Audit delegation is property-scoped, Front Desk only and off by defa
 test("Audit execution, overrides and Finance review have separate server permissions", () => {
   const id = String(new mongoose.Types.ObjectId());
   for (const role of ["owner", "administrator"]) {
-    assert.ok(allowed(role, "/night-audit/current/complete", "POST"));
+    assert.ok(allowed(role, "/night-audit/current/run", "POST"));
     assert.ok(allowed(role, "/night-audit/current/override", "POST"));
-    assert.equal(allowed(role, `/night-audit/${id}/finance-review`, "POST"), false);
+    assert.equal(allowed(role, `/night-audit/${id}/finance-review`, "POST"), true);
   }
   assert.equal(allowed("front_desk", "/night-audit/current"), false);
-  assert.ok(allowed("front_desk", "/night-audit/current/complete", "POST", ["night-audit.run"]));
+  assert.ok(allowed("front_desk", "/night-audit/current/run", "POST", ["night-audit.run"]));
   assert.equal(allowed("front_desk", "/night-audit/current/override", "POST", ["night-audit.run"]), false);
   assert.ok(allowed("finance", `/night-audit/${id}/finance-review`, "POST"));
   assert.equal(allowed("finance", "/night-audit/current/complete", "POST"), false);

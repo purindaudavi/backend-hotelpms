@@ -10,6 +10,25 @@
   finished monthly-subscription product. OTA integration is only one remaining
   part of the work.
 
+## Financials 2 comparison view: 2026-11-05
+
+An additional **Financials 2** sidebar entry now opens a unified comparison view:
+All Activity, Bills / Invoices, Unpaid Bills and Summary. Original Financials
+menus/screens remain available and their component file hashes were verified
+unchanged. Both interfaces share the same live property records and existing
+authorized APIs; actions are not simulated. Guest invoices reuse the original
+detail/payment/credit/refund workflow; supplier/expense/withdrawal actions retain
+existing server permissions, recipient validation and approvals. Front Desk,
+Housekeeping and Demo are denied access to the new view.
+
+Amounts are grouped by currency, and cash summaries exclude non-cash bills,
+credits, drafts, pending requests, voids and known Night Audit inflow artifacts.
+The original Profit & Loss report can be opened inside Summary with its existing
+calculations. This UI does not fix historical accounting or OTA integration.
+Optional pagination was added to read-only Purchase/Expense listing requests,
+preserving legacy responses when no page is supplied. See
+[comparison workflow, limitations and validation](financials2-comparison.md).
+
 ## Withdrawal recipients: 2026-11-04
 
 New withdrawal requests/records now select an actual property Owner or
@@ -694,6 +713,30 @@ Useful existing references:
 17. Backup restoration and recovery of a usable property workspace.
 
 ## Notes for future sessions
+
+- **2026-11-12: Night Audit V2 replaces the checklist workflow.** User chose Run
+  now only, with no automatic no-show decisions. One guarded transaction checks
+  blockers, records existing invoice allocations without a second revenue/cash
+  posting, saves six frozen reports and advances one business day. Manual receipt
+  verification uses local-date payment records; Owner/Admin alone overrides
+  eligible exceptions. Owner/Admin now verifies completed days as well as Finance.
+  Existing closed history remains. This does not migrate the whole PMS to an
+  accrual ledger or fix historical closed-day postings. See
+  [workflow, accounting boundaries and tests](NIGHT_AUDIT_V2.md).
+
+- **2026-11-12: Live Activity Logs.** Settings Activity Logs now reads existing
+  property audit events with Owner/Admin-only access, hotel-local dates,
+  pagination, actor/change details, visible-tab refresh and scoped CSV export.
+  The old static sample page has been replaced. This exposes existing recorded
+  events; it does not add logging to every operation or reconstruct missing
+  history. See [coverage, permissions and testing](ACTIVITY_LOGS.md).
+
+- 2026-11-06: [Staff money requests and opening funds](MONEY_REQUESTS.md) now
+  documents the four-role request → Owner approve → actual Paid flow, scoped
+  receipts/notifications, advances/returned change, and Owner-only one-time
+  opening balances. Verified with 275 backend tests, 69 real MongoDB/API checks,
+  frontend TypeScript and browser walkthroughs. This does not repair the separate
+  historical Night Audit revenue/tax issues or provide bank synchronization.
 
 - Treat this as a historical audit baseline. Verify current code before treating
   any item as still open, fixed, or fully working.

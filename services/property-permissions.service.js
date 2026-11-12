@@ -46,13 +46,22 @@ function requirePropertyPermission(permission) {
 // Only explicitly listed API operations are available to restricted staff.
 // Existing owner/admin/general-member workflows keep their operational access.
 function authorizePropertyRequest(req, res, next) {
+  if (req.path === "/activity-logs" || req.path.startsWith("/activity-logs/")) {
+    if (req.method === "GET" && ["owner", "administrator"].includes(req.propertyRole)) return next();
+    return res.status(403).json({ message: "Only the property Owner or Administrator can view activity logs.", code: "PROPERTY_PERMISSION_DENIED" });
+  }
+  if (req.path === "/money-requests" || req.path.startsWith("/money-requests/")) {
+    // Route handlers recheck the current property and owner/requester scope.
+    if (["owner", "administrator", "finance", "front_desk", "housekeeping"].includes(req.propertyRole)) return next();
+    return res.status(403).json({ message: "Your role cannot use money requests.", code: "PROPERTY_PERMISSION_DENIED" });
+  }
   if (req.path.startsWith("/night-audit/")) {
     const path = req.path.replace(/\/+$/, "");
     const runner = canRunNightAudit(req.propertyRole, req.propertyPermissions);
-    const read = req.method === "GET" && /^\/night-audit\/(?:current|history|[a-f\d]{24})$/i.test(path);
+    const read = req.method === "GET" && /^\/night-audit\/(?:current|history|[a-f\d]{24}(?:\/reports\/[a-f\d]{24})?)$/i.test(path);
     const review = req.method === "POST" && /^\/night-audit\/[a-f\d]{24}\/finance-review$/i.test(path);
-    if ((read && (runner || req.propertyRole === "finance")) || (review && req.propertyRole === "finance")) return next();
-    if (runner && ["POST", "PATCH"].includes(req.method) && /^\/night-audit\/current\/(?:review|override|post-room-revenue|review-housekeeping|review-channels|generate-reports|notes|complete)$/.test(path) &&
+    if ((read && (runner || req.propertyRole === "finance")) || (review && ["owner", "administrator", "finance"].includes(req.propertyRole))) return next();
+    if (runner && req.method === "POST" && /^\/night-audit\/current\/(?:override|reconciliation|run)$/.test(path) &&
         (!path.endsWith("/override") || ["owner", "administrator"].includes(req.propertyRole))) return next();
     return deny();
   }

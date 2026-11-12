@@ -24,6 +24,7 @@ const PurchaseSchema = new mongoose.Schema({
   paid_at: { type: Date },
   paid_by: { type: ActorSchema },
   payment_method: { type: String, trim: true, maxlength: 100, default: "" },
+  payment_method_details: { type: String, trim: true, maxlength: 150, default: "" },
   payment_reference: { type: String, trim: true, maxlength: 150, default: "" },
   voided_at: { type: Date },
   voided_by: { type: ActorSchema },

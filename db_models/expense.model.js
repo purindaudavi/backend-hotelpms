@@ -13,6 +13,7 @@ const ExpenseSchema = new mongoose.Schema({
   attachments: { type: [String], default: [] },
   remark: { type: String, trim: true, maxlength: 1000, default: "" },
   status: { type: String, enum: ["posted", "voided"], default: "posted", index: true },
+  cash_request_id: { type: mongoose.Schema.Types.ObjectId, index: { unique: true, sparse: true } },
   created_by: { type: ActorSchema, default: () => ({}) },
   voided_at: { type: Date },
   voided_by: { type: ActorSchema },

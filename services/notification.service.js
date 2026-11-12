@@ -14,6 +14,12 @@ const FRONT_DESK_NOTIFICATION_TYPES = Object.freeze(["booking", "invoice", "paym
 
 const notificationSources = [
   {
+    type: "money_request", model: require("../db_models/money-request-event.model"),
+    select: "request_id request_no title message created_at",
+    build: (record, propertyId) => ({ title: record.title, message: record.message, reference: record.request_no,
+      href: `/properties/${encodeURIComponent(propertyId)}/money-requests?request=${record.request_id}` })
+  },
+  {
     type: "booking",
     model: Reservation,
     select: "reservation_no status booking_source booker.name created_at",
@@ -119,13 +125,14 @@ const notificationSources = [
 function notificationTypesForRole(role) {
   if (role === "finance") return notificationSources.filter(source => source.type !== "booking").map(source => source.type);
   if (["owner", "administrator"].includes(role)) return [...notificationSources.map(source => source.type), ...HOUSEKEEPING_NOTIFICATION_TYPES];
-  if (role === "housekeeping") return [...HOUSEKEEPING_NOTIFICATION_TYPES];
+  if (role === "housekeeping") return [...HOUSEKEEPING_NOTIFICATION_TYPES, "money_request"];
   if (hasPropertyPermission(role, "operations.manage") || role === "demo") return notificationSources.map((source) => source.type);
-  return role === "front_desk" ? [...FRONT_DESK_NOTIFICATION_TYPES] : [];
+  return role === "front_desk" ? [...FRONT_DESK_NOTIFICATION_TYPES, "money_request"] : [];
 }
 
-function sourceFilter(propertyId, type, role) {
+function sourceFilter(propertyId, type, role, audience) {
   const filter = { property_id: propertyId };
+  if (type === "money_request") filter.audience_ids = audience?.user_id || { $in: [] };
   if (role === "front_desk") {
     if (type === "booking") filter.deleted_at = { $exists: false };
     if (type === "invoice" || type === "payment") filter.reservation_id = { $ne: null };
@@ -142,7 +149,7 @@ async function listPropertyNotifications(propertyId, limit = 30, role, audience)
   const sources = notificationSources.filter((source) => allowedTypes.includes(source.type));
   const batches = await Promise.all(sources.map(async (source) => {
     const records = await source.model
-      .find(sourceFilter(propertyId, source.type, role))
+      .find(sourceFilter(propertyId, source.type, role, audience))
       .sort({ created_at: -1 })
       .limit(perSourceLimit)
       .select(source.select)
@@ -164,7 +171,7 @@ async function canReadPropertyNotification(propertyId, notificationId, role, aud
   if (!match || !notificationTypesForRole(role).includes(match[1])) return false;
   if (HOUSEKEEPING_NOTIFICATION_TYPES.includes(match[1])) return canReadHousekeepingNotification(propertyId, match[1], match[2], role, audience);
   const source = notificationSources.find((item) => item.type === match[1]);
-  return Boolean(await source.model.findOne({ ...sourceFilter(propertyId, source.type, role), _id: match[2] }).select("_id").lean());
+  return Boolean(await source.model.findOne({ ...sourceFilter(propertyId, source.type, role, audience), _id: match[2] }).select("_id").lean());
 }
 
 function buildNotification(source, record, propertyId) {

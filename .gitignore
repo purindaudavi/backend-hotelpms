@@ -5,3 +5,4 @@ node_modules/
 .codex-work/
 tmp/
 .tmp-*.png
+output/pdf/

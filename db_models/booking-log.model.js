@@ -28,6 +28,8 @@ const BookingAuditLogSchema = new mongoose.Schema(
         "credit_note",
         "refund",
         "withdrawal",
+        "money_request",
+        "funds_opening",
         "financial_transaction",
         "purchase",
         "expense",
@@ -65,6 +67,9 @@ BookingAuditLogSchema.index({
   entity_id: 1,
   created_at: -1
 });
+
+// Property-wide activity browsing, with stable ordering when timestamps tie.
+BookingAuditLogSchema.index({ property_id: 1, created_at: -1, _id: -1 });
 
 const BookingAuditLog =
   mongoose.models.BookingAuditLog ||

@@ -1,0 +1,77 @@
+// Real MongoDB/API checks using disposable accounts/properties only.
+require("dotenv").config({ quiet: true });
+const assert=require("node:assert/strict"), mongoose=require("mongoose"), crypto=require("node:crypto"), jwt=require("jsonwebtoken");
+const Property=require("../db_models/property.model"), User=require("../db_models/user.model"), Request=require("../db_models/money-request.model"), Event=require("../db_models/money-request-event.model");
+const Expense=require("../db_models/expense.model"), Transaction=require("../db_models/financial-transaction.model"), Audit=require("../db_models/booking-log.model"), Guard=require("../db_models/inventory-guard.model"), Counter=require("../db_models/document-counter.model"), State=require("../db_models/notification-read-state.model");
+const Opening=require("../db_models/funds-opening.model");
+const {HousekeepingAttendant:Attendant}=require("../db_models/housecleaning.model");
+const {postFinancialTransaction}=require("../services/financial-transaction.service");
+const propertyId=`money-smoke-${crypto.randomBytes(5).toString("hex")}`, otherId=propertyId+"-other", ids=Array.from({length:6},()=>new mongoose.Types.ObjectId());
+let server,checks=0;
+async function main(){
+ await mongoose.connect(process.env.mongoURI||process.env.MONGO_URI,{serverSelectionTimeoutMS:10000});
+ await Promise.all([Request.init(),Event.init(),Expense.init(),Transaction.init(),Opening.init()]);
+ const [owner,admin,finance,desk,keeper,other]=await User.create(ids.map((_id,i)=>({_id,name:`Money Test ${i}`,email:`${propertyId}-${i}@example.test`,password:"disposable-no-login",mobile:"0771234567"})));
+ const attendant=await Attendant.create({property_id:propertyId,name:"Disposable Keeper",employee_number:"HK-TEST",status:"active"});
+ const info={hotel_name:propertyId,address:"Disposable fixture",email:"hotel@example.test",country_code:"LK"};
+ await Property.create([{property_id:propertyId,owner_id:owner._id,member_ids:[admin._id,finance._id,desk._id,keeper._id],administrator_ids:[admin._id],staff_roles:[{user_id:finance._id,role:"finance"},{user_id:desk._id,role:"front_desk"},{user_id:keeper._id,role:"housekeeping",attendant_id:attendant._id}],info},{property_id:otherId,owner_id:other._id,info}]);
+ const actor={user_id:String(owner._id),name:owner.name,email:owner.email};
+ for(const [kind,direction,amount]of [["payment","in",5000],["payment","in",3000],["invoice","non_cash",20000],["night_audit","in",6500]]) await postFinancialTransaction({propertyId,sourceType:kind,sourceId:new mongoose.Types.ObjectId(),sourceNumber:"TEST-"+kind+amount,direction,amount,currency:"LKR",actor,description:"Disposable test cash basis"});
+ const {app}=require("../app");server=app.listen(0,"127.0.0.1");await new Promise(r=>server.once("listening",r));
+ const call=(user,path,method="GET",body,hotel=propertyId)=>fetch(`http://127.0.0.1:${server.address().port}/api${path}${path.includes("?")?"&":"?"}property_id=${hotel}`,{method,headers:{Authorization:`Bearer ${jwt.sign({id:String(user._id)},process.env.JWT_SECRET,{expiresIn:"10m"})}`,"Content-Type":"application/json","x-user-id":String(owner._id)},...(body?{body:JSON.stringify({property_id:hotel,...body})}:{})});
+ const expect=async(r,status)=>{assert.equal(r.status,status,await r.clone().text());checks++;return r.json();};
+ const balance=async()=>{const b=await expect(await call(owner,"/money-requests/funds"),200);return b.balances.find(x=>x.currency==="LKR").balance;};
+ assert.equal(await balance(),8000);checks++;
+ for(const user of [desk,finance,keeper])await expect(await call(user,"/money-requests/funds"),403);
+ await expect(await call(admin,"/money-requests/funds"),200);
+ const request=(await expect(await call(desk,"/money-requests","POST",{amount:1000,currency:"LKR",purpose:"Buy hotel cleaning supplies",kind:"advance",status:"paid",requester_id:owner._id}),201)).request;
+ assert.equal(request.requester_id,String(desk._id));assert.equal(request.status,"pending");checks++;
+ const hk=(await expect(await call(keeper,"/money-requests","POST",{amount:100,currency:"LKR",purpose:"Housekeeping soap request"}),201)).request;
+ const fi=(await expect(await call(finance,"/money-requests","POST",{amount:100,currency:"LKR",purpose:"Finance office supplies"}),201)).request;
+ const ad=(await expect(await call(admin,"/money-requests","POST",{amount:100,currency:"LKR",purpose:"Admin office supplies"}),201)).request;
+ assert.equal((await expect(await call(keeper,"/money-requests"),200)).requests.length,1);checks++;
+ await expect(await call(keeper,`/money-requests/${request._id}`),404);await expect(await call(other,`/money-requests/${request._id}`),403);await expect(await call(owner,`/money-requests/${request._id}`,"GET",null,otherId),403);
+ for(const user of [admin,finance,desk,keeper])await expect(await call(user,`/money-requests/${request._id}/approve`,"POST",{version:0}),[desk,admin].includes(user)?403:404);
+ let record=(await expect(await call(owner,`/money-requests/${request._id}/approve`,"POST",{version:0}),200)).request;
+ assert.equal(await balance(),8000);checks++;
+ const input={version:record.version,paid_at:new Date().toISOString(),payment_method:"bank_transfer",payment_reference:"TEST-BANK-1",payment_confirmed:true};
+ await expect(await call(admin,`/money-requests/${record._id}/pay`,"POST",input),403);
+ await expect(await call(owner,`/money-requests/${record._id}/pay`,"POST",{...input,payment_confirmed:false}),400);
+ const concurrent=await Promise.all([call(owner,`/money-requests/${record._id}/pay`,"POST",input),call(owner,`/money-requests/${record._id}/pay`,"POST",input)]);assert.deepEqual(concurrent.map(r=>r.status).sort(),[200,409]);checks++;
+ record=(await expect(await call(owner,`/money-requests/${record._id}`),200)).request;
+ assert.equal(await balance(),7000);assert.equal(await Transaction.countDocuments({property_id:propertyId,source_type:"money_request",source_id:record._id}),1);checks++;
+ const proof=Buffer.from("%PDF-1.4\nDisposable receipt\n%%EOF");
+ record=(await expect(await call(desk,`/money-requests/${record._id}/receipts`,"POST",{name:"receipt.pdf",content_type:"application/pdf",data:proof.toString("base64")}),201)).request;
+ assert.equal(record.receipts[0].data,undefined);checks++;
+ const receiptPath=`/money-requests/${record._id}/receipts/${record.receipts[0]._id}`;
+ await expect(await call(keeper,receiptPath),404);
+ const download=await call(desk,receiptPath);assert.equal(download.status,200);assert.equal(download.headers.get("content-type"),"application/pdf");assert.deepEqual(Buffer.from(await download.arrayBuffer()),proof);checks++;
+ await expect(await call(owner,`/money-requests/${record._id}/settle`,"POST",{version:record.version,actual_spent:800,note:"Proof checked",return_confirmed:false}),400);
+ record=(await expect(await call(owner,`/money-requests/${record._id}/settle`,"POST",{version:record.version,actual_spent:800,note:"Proof checked and change received",return_confirmed:true}),200)).request;
+ assert.equal(await balance(),7200);const cost=await Expense.findOne({property_id:propertyId,cash_request_id:record._id});assert.equal(cost.amount,800);assert.equal(await Transaction.countDocuments({property_id:propertyId,source_type:"expense",source_id:cost._id}),0);checks++;
+ await expect(await call(owner,`/expenses/${cost._id}/void`,"POST",{reason:"Prevent duplicate cash reversal"}),409);
+ await expect(await call(owner,`/money-requests/${record._id}/settle`,"POST",{version:record.version,actual_spent:800,note:"Duplicate settlement",return_confirmed:true}),409);
+ for(const [user,wanted]of [[owner,true],[desk,true],[keeper,false],[finance,false]]){const feed=await expect(await call(user,"/notifications"),200);assert.equal(feed.notifications.some(n=>n.type==="money_request"&&n.reference===record.request_no),wanted);checks++;}
+ const changed=await Request.findById(record._id);assert.equal(changed.paid_by.user_id,String(owner._id));assert.equal(changed.requester.user_id,String(desk._id));assert.ok(changed.history.some(h=>h.action==="settle"));checks++;
+ record=(await expect(await call(owner,`/money-requests/${ad._id}/reject`,"POST",{version:ad.version,note:"Not approved for this purpose"}),200)).request;assert.equal(record.status,"rejected");checks++;
+ await expect(await call(finance,`/money-requests/${fi._id}/cancel`,"POST",{version:fi.version,note:"Request no longer needed"}),200);
+ const opening={currency:"LKR",amount:2000,note:"Hotel funds before recorded PMS payments",confirmed_before_recorded_movements:true};
+ for(const user of [admin,finance,desk,keeper])await expect(await call(user,"/money-requests/funds/opening","POST",opening),403);
+ await expect(await call(owner,"/money-requests/funds/opening","POST",{...opening,confirmed_before_recorded_movements:false}),400);
+ await expect(await call(owner,"/money-requests/funds/opening","POST",{...opening,amount:-1}),400);
+ await expect(await call(owner,"/money-requests/funds/opening","POST",opening),201);
+ assert.equal(await balance(),9200);checks++;
+ await expect(await call(owner,"/money-requests/funds/opening","POST",opening),409);
+ const once=await Promise.all([call(owner,"/money-requests/funds/opening","POST",{...opening,currency:"USD",amount:100}),call(owner,"/money-requests/funds/opening","POST",{...opening,currency:"USD",amount:100})]);
+ assert.deepEqual(once.map(r=>r.status).sort(),[201,409]);checks++;
+ const funds=await expect(await call(admin,"/money-requests/funds"),200);assert.equal(funds.balances.find(b=>b.currency==="USD").balance,100);assert.equal(funds.balances.find(b=>b.currency==="LKR").received,8200);checks++;
+ const legacy=(await expect(await call(admin,"/withdrawals","POST",{recipient_user_id:String(owner._id),amount:100,currency:"LKR",source_account:"cash_on_hand",payment_method:"cash",reason:"Legacy request must still need Owner",money_received_at:new Date().toISOString()}),201)).withdrawal;
+ assert.equal(legacy.status,"pending");assert.equal(await balance(),9200);checks++;
+ await expect(await call(admin,`/withdrawals/${legacy._id}/complete`,"POST",{version:legacy.version,note:"Admin cannot approve",money_received_at:new Date().toISOString()}),403);
+ await expect(await call(owner,`/withdrawals/${legacy._id}/void`,"POST",{reason:"Disposable legacy request rejected"}),200);
+ console.log(`PASS: ${checks} real MongoDB/authenticated API checks; requests for all four staff roles, scoped receipts/notifications, Owner-only approve/pay, simultaneous payment protection, exact cash balance and advance settlement without duplicate cash.`);
+}
+main().catch(e=>{console.error(`FAIL after ${checks} checks: ${e.name}: ${e.message.slice(0,1500)}`);process.exitCode=1;}).finally(async()=>{
+ try{if(server)await new Promise(r=>server.close(r));if(mongoose.connection.readyState===1){assert.ok(propertyId.startsWith("money-smoke-"));for(const Model of [Request,Event,Expense,Transaction,Audit,Counter,State,Attendant,Opening,require("../db_models/withdrawal.model"),Property]){await Model.deleteMany({property_id:{$in:[propertyId,otherId]}});assert.equal(await Model.countDocuments({property_id:{$in:[propertyId,otherId]}}),0);}await Guard.deleteMany({_id:{$in:[propertyId,otherId]}});await User.deleteMany({_id:{$in:ids},email:{$regex:`^${propertyId}-`}});assert.equal(await User.countDocuments({_id:{$in:ids}}),0);console.log("Disposable money-request fixtures removed; cleanup verified.");}}
+ catch(e){console.error(`Cleanup requires inspection for ${propertyId}: ${e.message}`);process.exitCode=1;}finally{await mongoose.disconnect();}
+});

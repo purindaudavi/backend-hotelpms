@@ -9,6 +9,8 @@ const TRANSACTION_SOURCE_TYPES = [
   "credit_note",
   "refund",
   "withdrawal",
+  "money_request",
+  "money_request_return",
   "purchase",
   "supplier_payment",
   "expense",

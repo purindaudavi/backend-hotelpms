@@ -15,6 +15,7 @@ const OverrideSchema = new mongoose.Schema(
   {
     step_id: { type: String, enum: NIGHT_AUDIT_STEP_IDS, required: true },
     exception_id: { type: String, required: true, trim: true, maxlength: 200 },
+    context_hash: { type: String, default: "" },
     reason: { type: String, required: true, trim: true, minlength: 10, maxlength: 1000 },
     approved_by: { type: ActorSchema, default: () => ({}) },
     approved_at: { type: Date, required: true, default: Date.now }
@@ -52,6 +53,8 @@ const NightAuditSchema = new mongoose.Schema(
       default: "open",
       index: true
     },
+    workflow_version: { type: Number, default: 1 },
+    reconciliation: { type: mongoose.Schema.Types.Mixed, default: undefined },
     currency: {
       type: String,
       required: true,

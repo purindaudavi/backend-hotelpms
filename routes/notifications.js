@@ -95,9 +95,9 @@ router.post("/read-all", asyncHandler(async (req, res) => {
 }));
 
 async function notificationAudience(req, propertyId) {
-  if (req.propertyRole !== "housekeeping") return undefined;
+  if (req.propertyRole !== "housekeeping") return { user_id: req.workspaceUser?._id };
   const { attendant } = await linkedAttendant(req, propertyId);
-  return { attendant_id: attendant._id };
+  return { attendant_id: attendant._id, user_id: req.workspaceUser?._id };
 }
 
 function requiredPropertyId(req) {

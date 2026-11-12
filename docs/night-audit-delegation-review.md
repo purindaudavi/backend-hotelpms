@@ -1,5 +1,9 @@
 # Night Audit delegation and Finance review
 
+> Historical V1 reference. The workflow and permission details below were
+> superseded on 2026-11-12 by [Night Audit V2](NIGHT_AUDIT_V2.md), including
+> Owner/Admin verification, single-run close and the accounting correction.
+
 Implemented on 2026-10-30. This supersedes the earlier Finance read-only Night Audit screen in `finance-role.md`.
 
 ## Permissions and workflow

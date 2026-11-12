@@ -13,6 +13,7 @@ async function nextDocumentNumber({ propertyId, documentType, date = new Date(),
     credit_note: "CN",
     refund: "RF",
     withdrawal: "WD",
+    money_request: "MR",
     purchase: "PUR",
     expense: "EXP",
     financial_transaction: "TX"

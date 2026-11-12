@@ -15,7 +15,7 @@ test("Finance uses an explicit API allowlist and cannot approve, void, change op
     if (!passed) assert.equal(status, 403);
   }
   assert.ok(!permissionsForRole("finance").includes("operations.manage"));
-  assert.equal(notificationTypesForRole("finance").length, 8);
+  assert.equal(notificationTypesForRole("finance").length, 9);
   assert.ok(!notificationTypesForRole("finance").includes("booking"));
 });
 
