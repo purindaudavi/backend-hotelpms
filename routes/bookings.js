@@ -12,7 +12,8 @@ const { withInventoryTransaction } = require("../services/inventory-transaction.
 const { bookingValidationMessage } = require("../services/booking-validation-message.service");
 const { enforceFrontDeskBookingRules, enforceFrontDeskPaymentCurrency } = require("../services/front-desk-booking.service");
 const { getCheckoutReview, assertCheckoutSettled } = require("../services/checkout-review.service");
-const { moveInHouseRooms, preserveAssignmentMetadata } = require("../services/room-move.service");
+const { moveInHouseRooms, preserveAssignmentMetadata, reassignConfirmedRoom, swapConfirmedRooms } = require("../services/room-move.service");
+const { getPendingStayExtension, assertBilledStayDatesCanChange } = require("../services/stay-extension-invoice.service");
 const {
   actorFromRequest,
   changesFromPayload,
@@ -310,7 +311,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
   }
 
   const actor = actorFromRequest(req);
-  const reservation = await inTransaction(req, async (session) => {
+  const { reservation, pendingStayExtension } = await inTransaction(req, async (session) => {
     const record = await findReservation(req, session);
     if (!record) throw notFound("Reservation not found.");
     if (["checked_out", "cancelled", "no_show"].includes(record.status)) {
@@ -328,6 +329,7 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
       session
     });
     await record.validate();
+    await assertBilledStayDatesCanChange(before, record, session);
     await validateReservationInventory({
       propertyId: record.property_id,
       checkIn: record.check_in,
@@ -358,13 +360,48 @@ router.patch("/reservations/:reservationId", asyncHandler(async (req, res) => {
       requestId: requestId(req),
       session
     });
-    return record;
+    const pendingStayExtension = record.check_out > before.check_out
+      ? await getPendingStayExtension(record, session)
+      : null;
+    return { reservation: record, pendingStayExtension };
   });
 
   return res.status(200).json({
     message: "Reservation updated successfully.",
-    reservation: serializeReservation(reservation)
+    reservation: serializeReservation(reservation),
+    pending_stay_extension: pendingStayExtension
   });
+}));
+
+router.post("/reservations/:reservationId/room-reassignment", asyncHandler(async (req, res) => {
+  const reservation = await inTransaction(req, async (session) => {
+    const record = await findReservation(req, session);
+    if (!record) throw notFound("Reservation not found.");
+    await reassignConfirmedRoom({
+      reservation: record, assignment: req.body, actor: actorFromRequest(req), requestId: requestId(req), session
+    });
+    await synchronizeAutomaticDraftInvoice({ reservation: record, requestId: requestId(req), session });
+    return record;
+  });
+  return res.status(200).json({ message: "Reservation room reassigned.", reservation: serializeReservation(reservation) });
+}));
+
+router.post("/reservations/:reservationId/room-swap", asyncHandler(async (req, res) => {
+  const otherId = req.body?.other?.reservation_id;
+  if (typeof otherId !== "string" || !mongoose.isValidObjectId(otherId)) throw badRequest("Select a reservation to swap with.");
+  const actor = actorFromRequest(req);
+  const currentRequestId = requestId(req);
+  const reservations = await inTransaction(req, async (session) => {
+    const reservation = await findReservation(req, session);
+    const otherReservation = await findReservation(req, session, otherId);
+    if (!reservation || !otherReservation) throw notFound("One of the reservations could not be found at this property.");
+    await swapConfirmedRooms({ reservation, otherReservation, assignment: req.body, actor, requestId: currentRequestId, session });
+    for (const item of [reservation, otherReservation]) {
+      await synchronizeAutomaticDraftInvoice({ reservation: item, requestId: currentRequestId, session });
+    }
+    return [reservation, otherReservation];
+  });
+  return res.status(200).json({ message: "Reservation rooms swapped.", reservations: reservations.map(serializeReservation) });
 }));
 
 router.post("/reservations/:reservationId/room-moves", asyncHandler(async (req, res) => {
@@ -1640,8 +1677,8 @@ function reservationSort(value) {
   return sorts[normalizeEnum(value)] || { reservation_date: -1, _id: -1 };
 }
 
-async function findReservation(req, session) {
-  if (!mongoose.isValidObjectId(req.params.reservationId)) return null;
+async function findReservation(req, session, reservationId = req.params.reservationId) {
+  if (!mongoose.isValidObjectId(reservationId)) return null;
   const propertyId = getPropertyId(req);
   if (!propertyId) {
     throw badRequest(
@@ -1649,7 +1686,7 @@ async function findReservation(req, session) {
     );
   }
   const query = {
-    _id: req.params.reservationId,
+    _id: reservationId,
     property_id: propertyId,
     deleted_at: { $exists: false }
   };

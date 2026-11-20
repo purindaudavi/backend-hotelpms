@@ -85,8 +85,8 @@ for (const action of ["approve", "reject", "cancel", "pay", "settle"]) router.po
         description: `Staff payment to ${record.requester.name}: ${record.purpose}`, actor, session });
     } else if (action === "settle") {
       if (record.status !== "paid" || record.kind !== "advance" || record.settled_at) throw fail(409, "Only an unsettled paid advance can be settled.");
-      const spent = Math.round(Number(req.body.actual_spent) * 100) / 100;
-      if (!Number.isFinite(spent) || spent < 0 || spent > record.amount) throw fail(400, "Actual spending must be between zero and the paid amount.");
+      const amount = req.body.actual_spent;
+      const spent = spentAmount(typeof amount === "string" && amount.trim() ? Number(amount) : amount, record.amount);
       if (note.length < 5) throw fail(400, "Enter a settlement note of at least 5 characters.");
       const returned = Math.round((record.amount - spent) * 100) / 100;
       if (returned > 0 && req.body.return_confirmed !== true) throw fail(400, "Confirm the unused money has actually been returned.");
@@ -98,6 +98,46 @@ for (const action of ["approve", "reject", "cancel", "pay", "settle"]) router.po
     }
     event(record, action, actor, note); await record.save({ session });
     await audit(record, action, actor, note, session, ctx.property.owner_id); return record;
+  });
+  res.json({ request: serialize(record) });
+}));
+router.post("/:id/report-spending", wrap(async (req, res) => {
+  const before = await context(req), actor = actorFromRequest(req);
+  const record = await withInventoryTransaction(before.propertyId, async session => {
+    const ctx = await context(req, session), record = await read(req, ctx, session);
+    if (String(record.requester_id) !== ctx.userId) throw fail(403, "Only the requester can report spending for this advance.");
+    checkVersion(record, req.body.version);
+    if (record.status !== "paid" || record.kind !== "advance" || record.settled_at) {
+      throw fail(409, "Spending can be reported only for a paid advance waiting for settlement.");
+    }
+
+    const spent = spentAmount(req.body.amount_spent, record.amount);
+    const unused = Math.round((record.amount - spent) * 100) / 100;
+    const note = req.body.note ?? "";
+    if (typeof note !== "string" || note.trim().length > 1000) throw fail(400, "Enter a note of at most 1000 characters.");
+    if (req.body.receipt != null && req.body.receipt_id != null) throw fail(400, "Choose an existing receipt or upload a new one.");
+
+    let receiptId;
+    if (req.body.receipt_id != null) {
+      if (typeof req.body.receipt_id !== "string" || !mongoose.isValidObjectId(req.body.receipt_id) || !record.receipts.id(req.body.receipt_id)) {
+        throw fail(400, "Choose a receipt already attached to this request.");
+      }
+      receiptId = req.body.receipt_id;
+    } else if (req.body.receipt != null) {
+      if (record.receipts.length >= 3) throw fail(409, "This request already has 3 files. Select an existing receipt.");
+      const receipt = receiptInput(req.body.receipt);
+      record.receipts.push({ ...receipt, uploaded_by: actor, uploaded_at: new Date() });
+      receiptId = record.receipts.at(-1)._id;
+    }
+    record.spending_report = {
+      amount_spent: spent, unused_amount: unused, note: note.trim(), receipt_id: receiptId,
+      submitted_by: actor, submitted_at: new Date()
+    };
+    const summary = `Spent ${record.currency} ${spent.toFixed(2)}. Unused ${record.currency} ${unused.toFixed(2)}.`;
+    event(record, "spending_reported", actor, summary);
+    await record.save({ session });
+    await audit(record, "spending_reported", actor, summary, session, ctx.property.owner_id);
+    return record;
   });
   res.json({ request: serialize(record) });
 }));
@@ -126,12 +166,19 @@ async function read(req, ctx, session = null, binary = false) {
   if (binary) query.select("+receipts.data");
   const record = await query; if (!record) throw fail(404, "Money request not found."); return record;
 }
+function spentAmount(value, limit) {
+  const cents = typeof value === "number" ? Math.round(value * 100) : NaN;
+  if (!Number.isSafeInteger(cents) || Math.abs(value * 100 - cents) > 0.000001 || value < 0 || cents / 100 > limit) {
+    throw fail(400, "Enter actual spending between zero and the paid amount, with up to two decimal places.");
+  }
+  return cents / 100;
+}
 async function audit(record, action, actor, note, session, ownerId) {
   await writeAuditLog({ propertyId: record.property_id, entityType: "money_request", entityId: record._id, action, description: `${record.request_no}: ${action}. ${note}`, actor, session });
   await require("../db_models/money-request-event.model").create([{
     property_id: record.property_id, request_id: record._id, request_no: record.request_no,
-    action, version: record.__v || 0, title: `${record.request_no}: ${action}`,
-    message: `${record.requester.name} · ${record.currency} ${record.amount.toFixed(2)} · ${record.purpose}`,
+    action, version: record.__v || 0, title: `${record.request_no}: ${action === "spending_reported" ? "Advance spending reported" : action}`,
+    message: action === "spending_reported" ? `${record.requester.name} · ${note}` : `${record.requester.name} · ${record.currency} ${record.amount.toFixed(2)} · ${record.purpose}`,
     audience_ids: [...new Set([String(ownerId), String(record.requester_id)].filter(id => mongoose.isValidObjectId(id)))]
   }], { session });
 }

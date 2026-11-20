@@ -9,6 +9,96 @@ const { writeAuditLog } = require("./booking-audit.service");
 
 const error = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 
+async function reassignConfirmedRoom({ reservation, assignment, actor, requestId, session }) {
+  if (!session?.inTransaction()) throw error(500, "Room reassignments require a protected database transaction.");
+  const line = confirmedRoomLine(reservation, assignment);
+  const destinationId = assignment.to_physical_room_id;
+  if (typeof destinationId !== "string" || !mongoose.isValidObjectId(destinationId)) throw error(400, "Select a valid destination room.");
+  if (String(line.physical_room_id) === destinationId.toLowerCase()) throw error(400, "Select a different destination room.");
+  const proposed = proposedRoomAssignment(reservation, line, destinationId);
+  await validateProposedAssignment(reservation, proposed.rooms, session);
+  await saveConfirmedAssignment(reservation, line, proposed.line, actor, requestId, session);
+  return reservation;
+}
+
+function confirmedRoomLine(reservation, assignment) {
+  if (reservation.status !== "confirmed") throw error(409, "Only a confirmed reservation awaiting check-in can be reassigned here.");
+  const { room_line_id, from_physical_room_id, expected_version } = assignment ?? {};
+  if (![room_line_id, from_physical_room_id].every((id) => typeof id === "string" && mongoose.isValidObjectId(id)) ||
+      !Number.isInteger(expected_version) || expected_version < 0) {
+    throw error(400, "Select a valid confirmed room assignment.");
+  }
+  const line = reservation.rooms.id(room_line_id);
+  const sourceId = from_physical_room_id.toLowerCase();
+  if (!line || String(line.physical_room_id) !== sourceId || (reservation.__v ?? 0) !== expected_version) {
+    throw error(409, "This reservation changed. Refresh bookings and select the room again.");
+  }
+  return line;
+}
+
+function proposedRoomAssignment(reservation, line, destinationId) {
+  const rooms = reservation.rooms.map((room) => room.toObject());
+  const proposedLine = rooms.find((room) => room._id.equals(line._id));
+  proposedLine.physical_room_id = new mongoose.Types.ObjectId(destinationId);
+  proposedLine.current_assignment_from = undefined;
+  return { rooms, line: proposedLine };
+}
+
+function validateProposedAssignment(reservation, rooms, session, proposedRoomsByReservation) {
+  return validateReservationInventory({
+    propertyId: reservation.property_id,
+    checkIn: reservation.check_in,
+    checkOut: reservation.check_out,
+    isDayRoom: reservation.is_day_room,
+    rooms,
+    excludeReservationId: reservation._id,
+    linkedBusinessBlockId: reservation.business_block_id,
+    proposedRoomsByReservation,
+    session
+  });
+}
+
+async function saveConfirmedAssignment(reservation, line, proposedLine, actor, requestId, session, swappedWith) {
+  const fromRoom = line.room_number;
+  line.physical_room_id = proposedLine.physical_room_id;
+  line.room_number = proposedLine.room_number;
+  line.current_assignment_from = proposedLine.current_assignment_from;
+  reservation.updated_by = actor;
+  await reservation.save({ session });
+  await writeAuditLog({
+    propertyId: reservation.property_id,
+    entityType: "reservation",
+    entityId: reservation._id,
+    action: swappedWith ? "reservation_rooms_swapped" : "reservation_room_moved",
+    description: swappedWith
+      ? `Reservation ${reservation.reservation_no} swapped room ${fromRoom} for ${line.room_number} with ${swappedWith} before check-in.`
+      : `Reservation ${reservation.reservation_no} reassigned from room ${fromRoom} to ${line.room_number} before check-in.`,
+    changes: [{ field: "room_number", from: fromRoom, to: line.room_number }],
+    actor,
+    requestId,
+    session
+  });
+}
+
+async function swapConfirmedRooms({ reservation, otherReservation, assignment, actor, requestId, session }) {
+  if (!session?.inTransaction()) throw error(500, "Room swaps require a protected database transaction.");
+  if (reservation.property_id !== otherReservation.property_id || String(reservation._id) === String(otherReservation._id)) {
+    throw error(400, "Select two different reservations at this property.");
+  }
+  const line = confirmedRoomLine(reservation, assignment);
+  const otherLine = confirmedRoomLine(otherReservation, assignment.other);
+  if (String(line.room_type_id) !== String(otherLine.room_type_id)) throw error(409, "Choose two rooms of the same type.");
+  if (String(line.physical_room_id) === String(otherLine.physical_room_id)) throw error(400, "Choose two different rooms.");
+
+  const proposed = proposedRoomAssignment(reservation, line, otherLine.physical_room_id);
+  const otherProposed = proposedRoomAssignment(otherReservation, otherLine, line.physical_room_id);
+  const assignments = new Map([[String(reservation._id), proposed.rooms], [String(otherReservation._id), otherProposed.rooms]]);
+  await validateProposedAssignment(reservation, proposed.rooms, session, assignments);
+  await validateProposedAssignment(otherReservation, otherProposed.rooms, session, assignments);
+  await saveConfirmedAssignment(reservation, line, proposed.line, actor, requestId, session, otherReservation.reservation_no);
+  await saveConfirmedAssignment(otherReservation, otherLine, otherProposed.line, actor, requestId, session, reservation.reservation_no);
+}
+
 async function moveInHouseRooms({ reservation, moves, businessDate, reason, actor, requestId = "", session }) {
   if (!session?.inTransaction()) throw error(500, "Room moves require a protected database transaction.");
   if (reservation.status !== "checked_in") throw error(409, "Only a checked-in reservation can be moved.");
@@ -106,4 +196,4 @@ function preserveAssignmentMetadata(before, record) {
   }
 }
 
-module.exports = { moveInHouseRooms, preserveAssignmentMetadata };
+module.exports = { moveInHouseRooms, preserveAssignmentMetadata, reassignConfirmedRoom, swapConfirmedRooms };

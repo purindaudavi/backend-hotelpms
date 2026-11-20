@@ -46,6 +46,17 @@ async function main(){
  const receiptPath=`/money-requests/${record._id}/receipts/${record.receipts[0]._id}`;
  await expect(await call(keeper,receiptPath),404);
  const download=await call(desk,receiptPath);assert.equal(download.status,200);assert.equal(download.headers.get("content-type"),"application/pdf");assert.deepEqual(Buffer.from(await download.arrayBuffer()),proof);checks++;
+ const spendingProof=Buffer.from("%PDF-1.4\nSpending receipt\n%%EOF");
+ const reportPath=`/money-requests/${record._id}/report-spending`;
+ record=(await expect(await call(desk,reportPath,"POST",{version:record.version,amount_spent:800,note:"Bought cleaning supplies",receipt:{name:"spending.pdf",content_type:"application/pdf",data:spendingProof.toString("base64")}}),200)).request;
+ assert.equal(record.spending_report.amount_spent,800);assert.equal(record.spending_report.unused_amount,200);assert.equal(record.spending_report.submitted_by.user_id,String(desk._id));assert.equal(record.receipts.length,2);assert.equal(record.receipts[1].data,undefined);assert.equal(await balance(),7000);assert.equal(await Expense.countDocuments({property_id:propertyId,cash_request_id:record._id}),0);checks++;
+ const ownerView=(await expect(await call(owner,`/money-requests/${record._id}`),200)).request;
+ assert.equal(ownerView.spending_report.receipt_id,record.receipts[1]._id);checks++;
+ const spendingDownload=await call(owner,`/money-requests/${record._id}/receipts/${ownerView.spending_report.receipt_id}`);
+ assert.equal(spendingDownload.status,200);assert.deepEqual(Buffer.from(await spendingDownload.arrayBuffer()),spendingProof);checks++;
+ const originalDownload=await call(owner,receiptPath);assert.equal(originalDownload.status,200);assert.deepEqual(Buffer.from(await originalDownload.arrayBuffer()),proof);checks++;
+ const ownerFeed=await expect(await call(owner,"/notifications"),200);
+ assert.ok(ownerFeed.notifications.some(n=>n.type==="money_request"&&n.reference===record.request_no&&n.title.includes("Advance spending reported")));checks++;
  await expect(await call(owner,`/money-requests/${record._id}/settle`,"POST",{version:record.version,actual_spent:800,note:"Proof checked",return_confirmed:false}),400);
  record=(await expect(await call(owner,`/money-requests/${record._id}/settle`,"POST",{version:record.version,actual_spent:800,note:"Proof checked and change received",return_confirmed:true}),200)).request;
  assert.equal(await balance(),7200);const cost=await Expense.findOne({property_id:propertyId,cash_request_id:record._id});assert.equal(cost.amount,800);assert.equal(await Transaction.countDocuments({property_id:propertyId,source_type:"expense",source_id:cost._id}),0);checks++;
@@ -69,7 +80,7 @@ async function main(){
  assert.equal(legacy.status,"pending");assert.equal(await balance(),9200);checks++;
  await expect(await call(admin,`/withdrawals/${legacy._id}/complete`,"POST",{version:legacy.version,note:"Admin cannot approve",money_received_at:new Date().toISOString()}),403);
  await expect(await call(owner,`/withdrawals/${legacy._id}/void`,"POST",{reason:"Disposable legacy request rejected"}),200);
- console.log(`PASS: ${checks} real MongoDB/authenticated API checks; requests for all four staff roles, scoped receipts/notifications, Owner-only approve/pay, simultaneous payment protection, exact cash balance and advance settlement without duplicate cash.`);
+ console.log(`PASS: ${checks} real MongoDB/authenticated API checks; staff roles, spending reports with receipts, scoped notifications, Owner-only payment and settlement, concurrent payment protection and exact cash balance.`);
 }
 main().catch(e=>{console.error(`FAIL after ${checks} checks: ${e.name}: ${e.message.slice(0,1500)}`);process.exitCode=1;}).finally(async()=>{
  try{if(server)await new Promise(r=>server.close(r));if(mongoose.connection.readyState===1){assert.ok(propertyId.startsWith("money-smoke-"));for(const Model of [Request,Event,Expense,Transaction,Audit,Counter,State,Attendant,Opening,require("../db_models/withdrawal.model"),Property]){await Model.deleteMany({property_id:{$in:[propertyId,otherId]}});assert.equal(await Model.countDocuments({property_id:{$in:[propertyId,otherId]}}),0);}await Guard.deleteMany({_id:{$in:[propertyId,otherId]}});await User.deleteMany({_id:{$in:ids},email:{$regex:`^${propertyId}-`}});assert.equal(await User.countDocuments({_id:{$in:ids}}),0);console.log("Disposable money-request fixtures removed; cleanup verified.");}}

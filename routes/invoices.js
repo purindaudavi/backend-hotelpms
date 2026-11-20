@@ -20,8 +20,14 @@ const {
   postFinancialTransaction,
   voidFinancialTransaction
 } = require("../services/financial-transaction.service");
+const {
+  isStayCharge, stayInvoices, linkedInvoices, getStayExtensionPlan, listPendingStayExtensions,
+  sameExtension, canIssueStayExtension
+} = require("../services/stay-extension-invoice.service");
 
 const router = express.Router();
+const BILLED_STAY_STATUSES = ["issued", "partially_paid", "paid"];
+const INVOICEABLE_STAY_STATUSES = ["tentative", "confirmed", "checked_in", "checked_out"];
 
 const DRAFT_EDIT_FIELDS = [
   "reference_number",
@@ -75,6 +81,19 @@ router.get("/", asyncHandler(async (req, res) => {
 router.post("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const actor = actorFromRequest(req);
+  const override = req.body?.stay_override;
+  let overrideReason, originalId;
+  if (override !== undefined) {
+    requireStayOverrideOwner(req);
+    overrideReason = typeof override?.reason === "string" ? override.reason.trim() : "";
+    if (override?.confirmed !== true || !overrideReason || overrideReason.length > 500) {
+      throw badRequest("Confirm the additional full-stay charge and enter a reason of up to 500 characters.");
+    }
+    originalId = objectId(override.invoice_id, "stay_override.invoice_id");
+    if (Object.hasOwn(req.body, "line_items") || Object.hasOwn(req.body, "additional_line_items")) {
+      throw badRequest("An additional full-stay invoice uses the charges from the saved reservation.");
+    }
+  }
   const invoice = await inTransaction(req, async (session) => {
     const reservationId = objectId(req.body?.reservation_id, "reservation_id");
     const reservation = await Reservation.findOne({
@@ -83,6 +102,17 @@ router.post("/", asyncHandler(async (req, res) => {
       deleted_at: { $exists: false }
     }).session(session);
     if (!reservation) throw notFound("Reservation not found.");
+
+    let originalInvoice;
+    if (override) {
+      const invoices = await linkedInvoices(reservation, session);
+      originalInvoice = findOverrideOriginal(invoices, originalId);
+      if (!originalInvoice || !INVOICEABLE_STAY_STATUSES.includes(reservation.status)) {
+        throw conflict("This reservation needs an active issued stay invoice before you can create an additional full-stay invoice.");
+      }
+      const draft = invoices.find((item) => item.stay_override && item.status === "draft");
+      if (draft) throw conflict(`Open the existing additional draft ${draft.invoice_no} before creating another.`);
+    }
 
     const guestId = req.body?.guest_id || reservation.booker?.guest_profile_id;
     if (!guestId) {
@@ -94,6 +124,15 @@ router.post("/", asyncHandler(async (req, res) => {
     }).session(session);
     if (!guest) throw notFound("Guest profile not found.");
 
+    const lineItems = Array.isArray(req.body?.line_items) && req.body.line_items.length
+      ? req.body.line_items
+      : [
+          ...buildAccommodationLines(reservation),
+          ...(Array.isArray(req.body?.additional_line_items) ? req.body.additional_line_items : [])
+        ];
+    if (!originalInvoice && lineItems.some(isStayCharge) && stayInvoices(await linkedInvoices(reservation, session)).some((invoice) => invoice.status !== "credited")) {
+      throw conflict("This stay already has an invoice. For extra nights, use the pending stay extension in Financials 2.");
+    }
     const invoiceDate = req.body?.invoice_date
       ? parseDate(req.body.invoice_date, "invoice_date")
       : new Date();
@@ -103,16 +142,11 @@ router.post("/", asyncHandler(async (req, res) => {
       date: invoiceDate,
       session
     });
-    const lineItems = Array.isArray(req.body?.line_items) && req.body.line_items.length
-      ? req.body.line_items
-      : [
-          ...buildAccommodationLines(reservation),
-          ...(Array.isArray(req.body?.additional_line_items) ? req.body.additional_line_items : [])
-        ];
 
     const [created] = await Invoice.create([{
       property_id: propertyId,
       invoice_no: invoiceNo,
+      ...(originalInvoice && { stay_override: { invoice_id: originalInvoice._id, invoice_no: originalInvoice.invoice_no, reason: overrideReason } }),
       reference_number: req.body?.reference_number,
       reservation_id: reservation._id,
       reservation_no: reservation.reservation_no,
@@ -146,8 +180,10 @@ router.post("/", asyncHandler(async (req, res) => {
 
     await writeInvoiceLog({
       invoice: created,
-      action: "invoice_created",
-      description: `Draft invoice ${created.invoice_no} was created for reservation ${created.reservation_no}.`,
+      action: originalInvoice ? "invoice_stay_override_draft_created" : "invoice_created",
+      description: originalInvoice
+        ? `Additional full-stay draft ${created.invoice_no} was created for ${created.reservation_no}, already billed on ${originalInvoice.invoice_no}. Reason: ${overrideReason}`
+        : `Draft invoice ${created.invoice_no} was created for reservation ${created.reservation_no}.`,
       actor,
       req,
       session
@@ -158,6 +194,73 @@ router.post("/", asyncHandler(async (req, res) => {
   return res.status(201).json({
     message: `Draft invoice ${invoice.invoice_no} created successfully.`,
     invoice: serializeFinancialDocument(invoice)
+  });
+}));
+
+router.get("/stay-extensions", asyncHandler(async (req, res) => {
+  const extensions = await listPendingStayExtensions(requirePropertyId(req));
+  res.set("Cache-Control", "private, no-store");
+  return res.json({ extensions });
+}));
+
+router.post("/stay-extensions", asyncHandler(async (req, res) => {
+  const propertyId = requirePropertyId(req);
+  const reservationId = objectId(req.body?.reservation_id, "reservation_id");
+  const expected = req.body;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expected.from_date || "") ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(expected.to_date || "") ||
+      !/^[A-Z]{3}$/.test(expected.currency || "") ||
+      !Number.isFinite(expected.amount) || expected.amount <= 0) {
+    throw badRequest("Select the saved stay extension and check its amount before creating the draft.");
+  }
+  const actor = actorFromRequest(req);
+  const result = await inTransaction(req, async (session) => {
+    const reservation = await Reservation.findOne({
+      _id: reservationId, property_id: propertyId, deleted_at: { $exists: false }
+    }).session(session);
+    if (!reservation) throw notFound("Reservation not found.");
+    const invoices = await linkedInvoices(reservation, session);
+    const existing = invoices.find((invoice) => sameExtension(invoice, expected));
+    if (existing) return { invoice: existing, created: false };
+
+    const plan = getStayExtensionPlan(reservation, invoices);
+    if (!plan || ["from_date", "to_date", "currency", "amount"].some((field) => expected[field] !== plan.preview[field])) {
+      throw conflict("The unbilled stay dates or amount changed. Refresh and review the booking before creating a draft.");
+    }
+    const { original, lines, preview } = plan;
+    const invoiceDate = new Date();
+    const invoiceNo = await nextDocumentNumber({ propertyId, documentType: "invoice", date: invoiceDate, session });
+    const [invoice] = await Invoice.create([{
+      property_id: propertyId,
+      invoice_no: invoiceNo,
+      extension_of: original._id,
+      reservation_id: reservation._id,
+      reservation_no: reservation.reservation_no,
+      guest_id: original.guest_id,
+      billing_type: original.billing_type,
+      billing_snapshot: original.billing_snapshot,
+      stay_snapshot: {
+        check_in: preview.from_date,
+        check_out: preview.to_date,
+        nights: preview.nights,
+        room_numbers: reservation.rooms.map((room) => room.room_number).filter(Boolean)
+      },
+      invoice_date: invoiceDate,
+      due_date: invoiceDate,
+      currency: preview.currency,
+      line_items: lines,
+      status: "draft",
+      notes: `Stay extension for ${reservation.reservation_no}. Original invoice ${original.invoice_no}.`,
+      created_by: actor,
+      updated_by: actor
+    }], { session });
+    await writeInvoiceLog({ invoice, action: "invoice_created", actor, req, session,
+      description: `Draft invoice ${invoice.invoice_no} created for the added nights of ${reservation.reservation_no}.` });
+    return { invoice, created: true };
+  });
+  return res.status(result.created ? 201 : 200).json({
+    message: result.created ? "Stay extension draft created." : "This stay extension already has an invoice.",
+    invoice: serializeFinancialDocument(result.invoice)
   });
 }));
 
@@ -187,6 +290,10 @@ router.patch("/:invoiceId", asyncHandler(async (req, res) => {
     if (record.status !== "draft") {
       throw conflict("Only a draft invoice can be edited. Use a credit note to correct an issued invoice.");
     }
+    if (record.stay_override) requireStayOverrideOwner(req);
+    if ((record.extension_of || record.stay_override) && Object.hasOwn(req.body || {}, "line_items")) {
+      throw conflict("The charges on this draft come from the reservation. Void the draft and recreate it if the stay changes.");
+    }
     const before = record.toObject();
     applyFields(record, req.body || {}, DRAFT_EDIT_FIELDS);
     record.updated_by = actor;
@@ -215,6 +322,30 @@ router.post("/:invoiceId/issue", asyncHandler(async (req, res) => {
     if (!record) throw notFound("Invoice not found.");
     if (record.status !== "draft") throw conflict("Only a draft invoice can be issued.");
     if (record.grand_total <= 0) throw conflict("A zero-value invoice cannot be issued.");
+    if (record.stay_override) {
+      requireStayOverrideOwner(req);
+      if (req.body?.confirm_stay_override !== true) throw badRequest("Confirm the additional full-stay charge before issuing this invoice.");
+      const reservation = await Reservation.findOne({
+        _id: record.reservation_id, property_id: record.property_id, deleted_at: { $exists: false }
+      }).session(session);
+      if (!reservation || !INVOICEABLE_STAY_STATUSES.includes(reservation.status) ||
+          !matchesSavedStay(record, reservation) ||
+          !findOverrideOriginal(await linkedInvoices(reservation, session), record.stay_override.invoice_id)) {
+        throw conflict("The stay or its original invoice has changed. Review the reservation and recreate this draft if needed.");
+      }
+    } else if (record.extension_of) {
+      const reservation = await Reservation.findOne({
+        _id: record.reservation_id, property_id: record.property_id, deleted_at: { $exists: false }
+      }).session(session);
+      if (!reservation || !canIssueStayExtension(reservation, await linkedInvoices(reservation, session), record)) {
+        throw conflict("This draft no longer matches the stay or its linked invoices. Review the reservation and recreate the draft.");
+      }
+    } else if (record.line_items.some(isStayCharge)) {
+      const invoices = await linkedInvoices({ property_id: record.property_id, _id: record.reservation_id }, session);
+      if (stayInvoices(invoices).some((invoice) => !invoice.extension_of && !["draft", "credited"].includes(invoice.status))) {
+        throw conflict("This stay already has an issued invoice. Use a stay extension invoice for additional nights.");
+      }
+    }
     record.status = "issued";
     record.issued_by = actor;
     record.issued_at = new Date();
@@ -233,15 +364,19 @@ router.post("/:invoiceId/issue", asyncHandler(async (req, res) => {
       reservationId: record.reservation_id,
       reservationNo: record.reservation_no,
       roomNumbers: record.stay_snapshot?.room_numbers || [],
-      description: `Invoice ${record.invoice_no} issued to ${record.billing_snapshot?.name || "guest"}.`,
+      description: record.stay_override
+        ? `Additional full-stay invoice ${record.invoice_no} issued to ${record.billing_snapshot?.name || "guest"}.`
+        : `Invoice ${record.invoice_no} issued to ${record.billing_snapshot?.name || "guest"}.`,
       actor,
       requestId: requestId(req),
       session
     });
     await writeInvoiceLog({
       invoice: record,
-      action: "invoice_issued",
-      description: `Invoice ${record.invoice_no} was issued for ${record.currency} ${record.grand_total.toFixed(2)}.`,
+      action: record.stay_override ? "invoice_stay_override_issued" : "invoice_issued",
+      description: record.stay_override
+        ? `Additional full-stay invoice ${record.invoice_no} was issued for ${record.currency} ${record.grand_total.toFixed(2)}. Original invoice ${record.stay_override.invoice_no}. Reason: ${record.stay_override.reason}`
+        : `Invoice ${record.invoice_no} was issued for ${record.currency} ${record.grand_total.toFixed(2)}.`,
       actor,
       req,
       session
@@ -438,6 +573,26 @@ async function findInvoice(req, session) {
     _id: objectId(req.params.invoiceId, "invoiceId"),
     property_id: requirePropertyId(req)
   }).session(session || null);
+}
+
+function requireStayOverrideOwner(req) {
+  if (req.propertyRole !== "owner") throw httpError(403, "Only the property Owner can create or issue an additional full-stay invoice.");
+}
+
+function findOverrideOriginal(invoices, invoiceId) {
+  return stayInvoices(invoices).find((invoice) => String(invoice._id) === String(invoiceId) &&
+    !invoice.extension_of && !invoice.stay_override && BILLED_STAY_STATUSES.includes(invoice.status));
+}
+
+function matchesSavedStay(invoice, reservation) {
+  const snapshot = invoice.stay_snapshot;
+  const fields = ["source_type", "source_id", "service_date", "room_number", "quantity", "unit_price", "discount_amount", "tax_rate"];
+  const charges = (lines) => lines.map((line) => JSON.stringify(fields.map((field) => line[field] ?? ""))).sort();
+  return invoice.currency === reservation.currency &&
+    Number(snapshot.check_in) === Number(reservation.check_in) &&
+    Number(snapshot.check_out) === Number(reservation.check_out) &&
+    Boolean(snapshot.is_day_room) === Boolean(reservation.is_day_room) &&
+    JSON.stringify(charges(invoice.line_items)) === JSON.stringify(charges(buildAccommodationLines(reservation)));
 }
 
 function writeInvoiceLog({ invoice, action, description, actor, changes = [], req, session }) {

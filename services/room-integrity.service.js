@@ -2,7 +2,6 @@ const Reservation = require("../db_models/booking.model");
 const { ACTIVE_RESERVATION_STATUSES } = Reservation;
 const BusinessBlock = require("../db_models/business-block.model");
 const Property = require("../db_models/property.model");
-const CrossBooking = require("../db_models/crossbooking.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
 const { HousekeepingTask, HousekeepingActivity } = require("../db_models/housecleaning.model");
 const { inventoryDay, inventoryRange, physicalAssignments } = require("./booking-inventory-dates.service");
@@ -125,9 +124,6 @@ async function validateRoomCatalogChange({ before, after, physicalRoomId, deleti
     if (reservations.length || blocks.length) throw conflict(`Room type ${before.name} has reservation/group history. Keep its identity and disable it when no active stays remain instead of deleting or renaming it.`);
   }
   if (deleting || identityChange || typeRename) {
-    const roomIds = oldRoom ? [oldRoom._id] : before.physical_rooms.map((room) => room._id);
-    const links = await CrossBooking.exists({ property_id: propertyId, $or: [{ room_a_id: { $in: roomIds } }, { room_b_id: { $in: roomIds } }] }).session(session);
-    if (links) throw conflict("Remove the room's cross-booking links before deleting or renaming it.");
     for (const Model of [HousekeepingTask, HousekeepingActivity]) {
       if (await Model.exists({ property_id: propertyId, ...(oldRoom ? { physical_room_id: oldRoom._id } : { room_type_id: before._id }) }).session(session)) {
         throw conflict("This room has housekeeping history. Keep its identity and disable it when no active stays remain instead of deleting or renaming it.");

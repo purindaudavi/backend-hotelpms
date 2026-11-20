@@ -38,6 +38,17 @@ test("extra service invoices and currencies must each be settled; surplus never 
   assert.equal(sameCurrency.totals_by_currency[0].balance_due, 25);
 });
 
+test("an issued owner override is collectible but cannot cover unbilled stay charges", () => {
+  const override = invoice({ _id: "override", invoice_no: "INV-2", stay_override: { invoice_id: "inv-one" } });
+  const invoices = [invoice(), override];
+  assert.equal(buildCheckoutReview(stay(), { invoices, payments: [payment()] }).totals_by_currency[0].balance_due, 1000);
+  const data = { invoices, payments: [payment(), payment({ invoice_id: "override" })] };
+  assert.equal(buildCheckoutReview(stay(), data).can_check_out, true);
+  const extended = buildCheckoutReview(stay({ financial_summary: { grand_total: 2000 } }), data);
+  assert.equal(extended.can_check_out, false);
+  assert.match(extended.issues[0], /exceeds linked invoice totals by LKR 1000/);
+});
+
 test("only issued credits, completed refunds and non-voided payments affect settlement", () => {
   const data = { invoices: [invoice()], payments: [payment({ amount: 700 }), payment({ amount: 10000, status: "voided" })],
     credits: [{ invoice_id: "inv-one", currency: "LKR", total_credit: 300, status: "draft" }] };

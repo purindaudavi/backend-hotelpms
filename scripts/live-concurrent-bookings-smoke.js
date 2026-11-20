@@ -12,7 +12,6 @@ const Reservation = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const InventoryGuard = require("../db_models/inventory-guard.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
-const CrossBooking = require("../db_models/crossbooking.model");
 const Guest = require("../db_models/guest.model");
 const Invoice = require("../db_models/invoice.model");
 const BookingAuditLog = require("../db_models/booking-log.model");
@@ -112,7 +111,6 @@ async function main() {
       });
       app.use("/bookings", require("../routes/bookings"));
       app.use("/rooms", require("../routes/rooms"));
-      app.use("/cross-bookings", require("../routes/crossbooking"));
       const server = app.listen(0, "127.0.0.1");
       servers.push(server);
       await new Promise((resolve) => server.once("listening", resolve));
@@ -179,19 +177,11 @@ async function main() {
       }
       {
         const { propertyId, type } = await fixture(2);
-        const result = await request(0, "/cross-bookings", "POST", { property_id: propertyId, room_a_id: type.physical_rooms[0]._id, room_b_id: type.physical_rooms[1]._id });
-        assert.equal(result.status, 201, JSON.stringify(result));
-        oneWinner(await Promise.all([0, 1].map((index) => book(index, propertyId, type, {
+        const results = await Promise.all([0, 1].map((index) => book(index, propertyId, type, {
           rooms: [{ ...payload(propertyId, type).rooms[0], physical_room_id: type.physical_rooms[index]._id }]
-        }))));
-        const linkId = result.body.cross_booking._id;
-        for (const active of [false, true]) {
-          const changed = await request(0, `/cross-bookings/${linkId}`, "PATCH", { property_id: propertyId, active });
-          assert.equal(changed.status, 200, JSON.stringify(changed));
-        }
-        const removed = await request(0, `/cross-bookings/${linkId}?property_id=${propertyId}`, "DELETE");
-        assert.equal(removed.status, 200, JSON.stringify(removed));
-        console.log("PASS: competing cross-linked physical rooms cannot both be booked.");
+        })));
+        assert.deepEqual(results.map((item) => item.status), [201, 201], JSON.stringify(results));
+        console.log("PASS: different physical rooms can both be booked for the same dates.");
       }
       {
         const { propertyId, type } = await fixture();
@@ -338,20 +328,7 @@ async function main() {
       assert.equal(conflict.status, 409, JSON.stringify(conflict));
       assert.match(conflict.body.message, /already booked/);
       assert.equal((await book(1, propertyId, type, { ...dayUse, rooms: assigned(1) })).status, 201);
-      const linked = await request(0, "/cross-bookings", "POST", { property_id: propertyId, room_a_id: type.physical_rooms[0]._id, room_b_id: type.physical_rooms[1]._id });
-      assert.equal(linked.status, 409, JSON.stringify(linked));
-      console.log("PASS DAY USE: same physical room is blocked despite spare capacity; conflicting rooms cannot be linked afterward.");
-    }
-    {
-      const { propertyId, type } = await fixture(2);
-      const linked = await request(0, "/cross-bookings", "POST", { property_id: propertyId, room_a_id: type.physical_rooms[0]._id, room_b_id: type.physical_rooms[1]._id });
-      assert.equal(linked.status, 201, JSON.stringify(linked));
-      const assigned = (index) => [{ ...payload(propertyId, type).rooms[0], physical_room_id: type.physical_rooms[index]._id }];
-      assert.equal((await book(0, propertyId, type, { ...dayUse, rooms: assigned(0) })).status, 201);
-      const conflict = await book(1, propertyId, type, { ...dayUse, rooms: assigned(1) });
-      assert.equal(conflict.status, 409, JSON.stringify(conflict));
-      assert.match(conflict.body.message, /cross-booked room/);
-      console.log("PASS DAY USE: pre-existing cross-booking links block same-day conflicts.");
+      console.log("PASS DAY USE: same physical room is blocked despite spare capacity.");
     }
     {
       const { propertyId, type } = await fixture();
@@ -537,16 +514,6 @@ async function main() {
       console.log("PASS ROOM MOVE: day-use room moves preserve same-day dates and zero overnight nights.");
     }
     {
-      const item = await inHouse();
-      await CrossBooking.create({ property_id: item.propertyId, room_a_id: item.type.physical_rooms[1]._id, room_b_id: item.type.physical_rooms[2]._id,
-        room_a_number: "102", room_b_number: "103", room_a_type_id: item.type._id, room_b_type_id: item.type._id, room_a_type_name: item.type.name, room_b_type_name: item.type.name });
-      await saveSeed(item.propertyId, item.type, { is_day_room: true, check_in: "2026-10-21", check_out: "2026-10-21", rooms: [{ ...payload(item.propertyId, item.type).rooms[0], physical_room_id: item.type.physical_rooms[2]._id, room_number: "103" }] });
-      const result = await move(item);
-      assert.equal(result.status, 409, JSON.stringify(result));
-      assert.match(result.body.message, /cross-booked room/);
-      console.log("PASS ROOM MOVE: cross-linked day-use conflicts during the remaining stay block moves.");
-    }
-    {
       const item = await inHouse(2);
       const results = await Promise.all([move(item), book(1, item.propertyId, item.type, {
         check_in: "2026-10-20", check_out: "2026-10-23", rooms: [{ ...payload(item.propertyId, item.type).rooms[0], physical_room_id: item.type.physical_rooms[1]._id }]
@@ -561,7 +528,7 @@ async function main() {
     try {
       if (mongoose.connection.readyState === 1 && properties.length) {
         assert.ok(properties.every((id) => id.startsWith(`${namespace}-`) && /^\d+$/.test(id.slice(namespace.length + 1))));
-        for (const Model of [Reservation, BusinessBlock, CrossBooking, Guest, Invoice, BookingAuditLog, DocumentCounter, FinancialTransaction, RatePlan, DailyRate, RoomType, HousekeepingTask, HousekeepingActivity]) {
+        for (const Model of [Reservation, BusinessBlock, Guest, Invoice, BookingAuditLog, DocumentCounter, FinancialTransaction, RatePlan, DailyRate, RoomType, HousekeepingTask, HousekeepingActivity]) {
           const filter = { property_id: { $in: properties } };
           await Model.deleteMany(filter);
           assert.equal(await Model.countDocuments(filter), 0);

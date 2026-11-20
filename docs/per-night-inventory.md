@@ -18,9 +18,8 @@ stays. Capacity shortages identify the room type, available quantity and date.
 Dates follow the existing PMS UTC-calendar-date convention.
 
 Existing safeguards remain: property scope, reservation-edit self-exclusion,
-active reservation statuses, group-block exclusions, physical-room overlap and
-cross-booked physical-room checks. Inactive, maintenance and out-of-order rooms
-do not increase sellable capacity.
+active reservation statuses, group-block exclusions and physical-room overlap.
+Inactive, maintenance and out-of-order rooms do not increase sellable capacity.
 
 This shared validator is already called by reservation creation/editing, business
 block validation/pickup and the development OTA reservation importer. No live OTA
@@ -39,8 +38,8 @@ again from `D:\DMS new\hotelbackend`.
    for this room type covering October 20-23, 2026. Use future dates relative to
    the property's business date if necessary; shift all the example dates
    together.
-3. Ensure no other bookings, active group holds or cross-booking links affect
-   these test rooms/dates.
+3. Ensure that no other bookings or active group holds affect these test rooms
+   and dates.
 4. Create these confirmed reservations, using normal required guest details:
 
 | Reservation | Physical room | Check-in | Check-out | Expected result |

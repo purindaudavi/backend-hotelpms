@@ -394,7 +394,7 @@ async function occupancyByDate(propertyId, parameters) {
   });
   return tabular(rows, columnsFromRows(rows), { days: rows.length, total_rooms: totalRooms }, {
     average_occupancy_percentage: rows.length ? round(sum(rows, "occupancy_percentage") / rows.length) : 0
-  }, ["Business-block holds and cross-booking links are not deducted from the available-room figure."]);
+  }, ["Available rooms are counted before business-block holds."]);
 }
 
 async function paymentRecords(propertyId, parameters) {

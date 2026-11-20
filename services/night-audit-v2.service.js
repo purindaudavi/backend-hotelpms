@@ -47,7 +47,9 @@ function dailyCharges(reservation, invoices, day) {
       lines.push({ reservation_id: String(reservation._id), reservation_no: reservation.reservation_no, guest: reservation.booker?.name || "",
         invoice_id: String(invoice._id), invoice_no: invoice.invoice_no, line_id: String(line._id), room: line.room_number || "", category: line.source_type,
         currency: invoice.currency, net, tax, credit: money(net + tax - adjustedNet - adjustedTax), total: money(adjustedNet + adjustedTax),
-        day_use: Boolean(stay.is_day_room), basis: "Existing invoice allocation; not an additional charge or payment" });
+        day_use: Boolean(stay.is_day_room), basis: invoice.stay_override
+          ? `Owner-approved additional stay invoice (original ${invoice.stay_override.invoice_no})`
+          : "Existing invoice allocation; not an additional charge or payment" });
     }
   }
   return lines;

@@ -14,7 +14,7 @@ Implemented: 2026-10-16.
 6. Enter the reason and click **Move guest**.
 
 The move uses the property's current business date, not a new arrival date.
-Future-date conflicts and cross-booking links are checked again on save, so a
+Future-date conflicts are checked again on save, so a
 room offered in the dropdown can still be rejected if its remaining-stay
 availability has changed.
 
@@ -41,7 +41,7 @@ Use a test property and synthetic guest information, not real customer records.
 
 1. Configure at least two active rooms of the same type: 101 and 102. Both
    should initially be available and clean/inspected, without conflicting
-   reservations, group holds or cross-booking restrictions.
+   reservations or group holds.
 2. Create a confirmed test reservation in room 101 covering the property's
    current business date and at least one later departure day. Use an active
    rate plan covering the dates. Check the guest in normally.
@@ -79,8 +79,6 @@ different synthetic guest into it. Checking out the original reservation from
 - A destination used only before the effective move date should not block the
   move. The original room's historical allocation is preserved, and the new
   room is not retrospectively assigned to the guest for those earlier dates.
-- Cross-booking conflicts, including a day-use booking in a linked room during
-  the remaining stay, must reject the move.
 - On a multi-room reservation, moving one room must leave all other assignments
   occupied and unchanged. The API also supports an all-or-nothing multi-room
   batch; the UI performs one chosen room move at a time.
@@ -107,7 +105,7 @@ one property-guarded MongoDB transaction. Any failure rolls them all back.
 
 Each reservation room stores a server-owned `current_assignment_from`; append-only
 through the API, `room_moves` records preserve earlier room allocation intervals.
-The shared backend physical-room/cross-booking checks and the Front Desk grid
+The shared backend physical-room checks and the Front Desk grid
 honour those intervals. New/edited client payloads cannot forge these assignment
 dates or erase history. No migration is needed for existing reservations: a
 legacy room without assignment metadata starts at the original arrival date.

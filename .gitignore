@@ -6,3 +6,4 @@ node_modules/
 tmp/
 .tmp-*.png
 output/pdf/
+docs/

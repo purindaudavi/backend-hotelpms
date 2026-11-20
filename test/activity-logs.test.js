@@ -1,5 +1,6 @@
 const test = require("node:test"), assert = require("node:assert/strict"), express = require("express");
 const AuditLog = require("../db_models/booking-log.model");
+const NightAudit = require("../db_models/night-audit.model");
 const { activityFilter, dateBoundary, timezoneFor, serializeLog, exportCsv } = require("../services/activity-log.service");
 const { authorizePropertyRequest } = require("../services/property-permissions.service");
 
@@ -60,5 +61,24 @@ test("Activity Logs API enforces role boundaries, scopes listing/export, paginat
   for (const query of ["?page=-1", "?limit=101", "?page=1.2", "?date_from=not-a-date", "?search=x&search=y"]) assert.equal((await call(query)).status, 400, query);
   for (const method of ["POST", "PATCH", "DELETE"]) assert.equal((await call("", "owner", method)).status, 403);
   count = 5001; response = await call("/export"); assert.equal(response.status, 422); assert.match((await response.json()).message, /Narrow/);
+
+  const auditId = "6ae45250eeb5c543567f67ad", missingId = "6ae45250eeb5c543567f67ae";
+  const review = { entity_type: "night_audit", action: "night_audit_finance_review", entity_id: auditId };
+  Object.assign(rows[0], review);
+  Object.assign(rows[1], review);
+  Object.assign(rows[2], review, { entity_id: missingId });
+  rows.push({ ...rows[0], _id: "log-3", action: "night_audit_completed" });
+  count = rows.length;
+  const linkedAudits = t.mock.method(NightAudit, "find", query => {
+    assert.deepEqual(query, { property_id: "hotel-authorized", _id: { $in: [auditId, missingId] } });
+    return { select(fields) { assert.equal(fields, "business_date"); return this; },
+      lean() { return Promise.resolve([{ _id: auditId, business_date: new Date("2026-10-30T00:00:00Z") }]); } };
+  });
+  response = await call("?property_id=hotel-attacker", "administrator");
+  assert.equal(response.status, 200);
+  body = await response.json();
+  assert.deepEqual(body.logs.map(log => log.audit_business_date), ["2026-10-30", "2026-10-30", undefined, undefined]);
+  assert.equal(body.logs[0].created_at, "2026-11-12T10:00:00.000Z");
+  assert.equal(linkedAudits.mock.callCount(), 1);
   function roleFor(req) { return req.get("test-role"); }
 });

@@ -99,10 +99,16 @@ router.post("/:auditId/finance-review", atomic(false, async (req, ctx) => {
   if (audit.status !== "closed") throw V.error(409, "Complete the audit before verifying it.");
   if (!Number.isInteger(req.body.version) || req.body.version !== audit.version) throw V.error(409, "Another review was saved. Reload this audit before reviewing again.");
   const note = typeof req.body.note === "string" ? req.body.note.trim() : "", status = req.body.status;
-  if (!["reviewed", "flagged"].includes(status) || req.body.confirmed !== true || note.length > 3000 || (status === "flagged" && note.length < 5)) throw V.error(400, "Confirm your review and explain any flagged difference (5–3,000 characters).");
+  if (!["reviewed", "flagged"].includes(status) || req.body.confirmed !== true || note.length > 3000) throw V.error(400, "Confirm your review and keep the note to 3,000 characters or fewer.");
+  const followUp = ["reviewed", "flagged"].includes(audit.finance_review_status);
+  if (note.length < 5 && (followUp || status === "flagged")) {
+    throw V.error(400, followUp ? "Enter a follow-up reason of at least 5 characters." : "Explain the flagged difference in at least 5 characters.");
+  }
   const at = new Date(); audit.finance_review_status = status; audit.finance_review_note = note; audit.finance_reviewed_by = ctx.actor; audit.finance_reviewed_at = at;
   audit.finance_review_history.push({ status, note, actor: ctx.actor, at }); await audit.save({ session: ctx.session });
-  await log(ctx, audit, "night_audit_finance_review", `${status} by ${ctx.actor.name}: ${note}`); return { night_audit: await view(audit, ctx) };
+  const description = note ? `${status} by ${ctx.actor.name}: ${note}` : `${status} by ${ctx.actor.name}`;
+  await log(ctx, audit, "night_audit_finance_review", description.slice(0, 2000));
+  return { night_audit: await view(audit, ctx) };
 }));
 router.get("/:auditId/reports/:reportId", asyncRoute(async (req, res) => {
   const ctx = await context(req, null), audit = await findAudit(req.params.auditId, ctx);

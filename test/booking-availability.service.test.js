@@ -4,7 +4,8 @@ const mongoose = require("mongoose");
 const Reservation = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
-const CrossBooking = require("../db_models/crossbooking.model");
+const BookingAuditLog = require("../db_models/booking-log.model");
+const { reassignConfirmedRoom, swapConfirmedRooms } = require("../services/room-move.service");
 const {
   validateReservationInventory,
   validateBusinessBlockInventory
@@ -69,7 +70,7 @@ function project(record, projection) {
   return Object.fromEntries(Object.entries(record).filter(([key]) => key === "_id" || projection[key]));
 }
 
-function setup(t, { capacity = 2, reservations = [], blocks = [], links = [], physicalRooms, roomTypes } = {}) {
+function setup(t, { capacity = 2, reservations = [], blocks = [], physicalRooms, roomTypes } = {}) {
   const type = new RoomType({
     _id: typeId, property_id: propertyId, name: "Standard", active: true,
     maximum_adults: 2, maximum_children: 2,
@@ -84,7 +85,6 @@ function setup(t, { capacity = 2, reservations = [], blocks = [], links = [], ph
   t.mock.method(Reservation, "exists", (filter) => query(reservations.some((item) => matches(item, filter)) ? { _id: "found" } : null));
   t.mock.method(Reservation, "findOne", (filter, projection) => query(project(reservations.find((item) => matches(item, filter)) || null, projection)));
   t.mock.method(BusinessBlock, "find", (filter, projection) => query(blocks.filter((item) => matches(item, filter)).map((item) => project(item, projection))));
-  t.mock.method(CrossBooking, "find", () => query(links));
   return {
     type, calls,
     validate: (overrides = {}) => validateReservationInventory({
@@ -96,6 +96,113 @@ function setup(t, { capacity = 2, reservations = [], blocks = [], links = [], ph
 test("accepts a two-night stay when different bookings use one room on each night", async (t) => {
   const { validate } = setup(t, { reservations: [booking("2026-10-20", "2026-10-21"), booking("2026-10-21", "2026-10-22")] });
   await validate();
+});
+
+test("reassigns a confirmed reservation's selected room without changing its stay or financials", async (t) => {
+  const { type } = setup(t, { capacity: 3 });
+  const [source, destination, other] = type.physical_rooms;
+  const lineFor = (physicalRoom) => room({ physical_room_id: physicalRoom._id, room_number: physicalRoom.room_number,
+    room_type_name: type.name, effective_nightly_rate: 6500 });
+  const reservation = new Reservation(booking("2026-10-20", "2026-10-22", {
+    reservation_no: "REASSIGN-1",
+    booker: { name: "Test Guest", phone: "+94710000000", email: "guest@example.test", country: "LK" },
+    rooms: [lineFor(source), lineFor(other)],
+    financial_summary: { room_total: 26000, grand_total: 26000, paid_total: 10000 }
+  }));
+  await reservation.validate();
+  const original = reservation.toObject();
+  const session = { inTransaction: () => true };
+  const save = t.mock.method(reservation, "save", async (options) => {
+    assert.equal(options.session, session);
+    await reservation.validate();
+  });
+  const audit = t.mock.method(BookingAuditLog, "create", async (entries, options) => {
+    assert.equal(options.session, session);
+    return entries;
+  });
+  const assignment = {
+    room_line_id: String(reservation.rooms[0]._id), from_physical_room_id: String(source._id),
+    to_physical_room_id: String(destination._id), expected_version: 0
+  };
+  const move = (payload = assignment) => reassignConfirmedRoom({ reservation, assignment: payload, actor: { name: "Front Desk" }, session });
+  await assert.rejects(move({ ...assignment, expected_version: 1 }), /reservation changed/);
+  await move();
+  assert.equal(reservation.reservation_no, original.reservation_no);
+  assert.equal(reservation.status, "confirmed");
+  assert.deepEqual(reservation.check_in, original.check_in);
+  assert.deepEqual(reservation.check_out, original.check_out);
+  assert.deepEqual(reservation.booker.toObject(), original.booker);
+  assert.deepEqual(reservation.financial_summary.toObject(), original.financial_summary);
+  assert.equal(String(reservation.rooms[0]._id), assignment.room_line_id);
+  assert.equal(reservation.rooms[0].room_number, destination.room_number);
+  assert.equal(reservation.rooms[0].effective_nightly_rate, 6500);
+  assert.deepEqual(reservation.rooms[1].toObject(), original.rooms[1]);
+  assert.equal(reservation.room_moves.length, 0);
+  assert.equal(save.mock.callCount(), 1);
+  assert.match(audit.mock.calls[0].arguments[0][0].description, /room 101 to 102 before check-in/);
+  await assert.rejects(move(), /reservation changed/);
+});
+
+test("a confirmed room reassignment rejects a destination booked on a later night", async (t) => {
+  const physicalRooms = [{ _id: new mongoose.Types.ObjectId(), room_number: "101" }, { _id: new mongoose.Types.ObjectId(), room_number: "102" }];
+  const [source, destination] = physicalRooms;
+  const laterBooking = booking("2026-10-21", "2026-10-22", { rooms: [room({ physical_room_id: destination._id, room_number: "102" })] });
+  setup(t, { physicalRooms, reservations: [laterBooking] });
+  const reservation = new Reservation(booking("2026-10-20", "2026-10-22", { rooms: [room({ physical_room_id: source._id, room_number: "101" })] }));
+  const save = t.mock.method(reservation, "save", async () => {});
+  const options = { reservation, session: { inTransaction: () => true }, assignment: {
+    room_line_id: String(reservation.rooms[0]._id), from_physical_room_id: String(source._id),
+    to_physical_room_id: String(destination._id), expected_version: 0
+  } };
+  reservation.status = "checked_in";
+  await assert.rejects(reassignConfirmedRoom(options), /awaiting check-in/);
+  reservation.status = "confirmed";
+  await assert.rejects(reassignConfirmedRoom(options), /Room 102 is already booked/);
+  assert.equal(save.mock.callCount(), 0);
+  assert.equal(String(reservation.rooms[0].physical_room_id), String(source._id));
+});
+
+test("a swap validates both stays against the proposed rooms and preserves the original reservations until both checks pass", async (t) => {
+  const physicalRooms = ["101", "103"].map(room_number => ({ _id: new mongoose.Types.ObjectId(), room_number }));
+  const [firstRoom, secondRoom] = physicalRooms;
+  const makeStay = (name, assigned, checkIn, checkOut) => new Reservation(booking(checkIn, checkOut, {
+    reservation_no: name, booker: { name }, rooms: [room({ physical_room_id: assigned._id, room_number: assigned.room_number,
+      room_type_name: "Standard", effective_nightly_rate: 6500 })], financial_summary: { grand_total: 13000, paid_total: 1000 }
+  }));
+  const reservation = makeStay("RES-ONE", firstRoom, "2026-10-20", "2026-10-22");
+  const otherReservation = makeStay("RES-TWO", secondRoom, "2026-10-21", "2026-10-24");
+  const [firstBefore, secondBefore] = [reservation.toObject(), otherReservation.toObject()];
+  const third = booking("2026-10-22", "2026-10-24", { rooms: [room({ physical_room_id: firstRoom._id })] });
+  const booked = [firstBefore, secondBefore, third];
+  setup(t, { physicalRooms, reservations: booked });
+  const session = { inTransaction: () => true };
+  const saves = [reservation, otherReservation].map(item => t.mock.method(item, "save", async options => assert.equal(options.session, session)));
+  const audit = t.mock.method(BookingAuditLog, "create", async (entries, options) => {
+    assert.equal(options.session, session);
+    return entries;
+  });
+  const forStay = (item) => ({ room_line_id: String(item.rooms[0]._id), from_physical_room_id: String(item.rooms[0].physical_room_id), expected_version: 0 });
+  const assignment = { ...forStay(reservation), other: forStay(otherReservation) };
+  const swap = () => swapConfirmedRooms({ reservation, otherReservation, assignment, session });
+  await assert.rejects(swap(), /Room 101 is already booked/);
+  assert.equal(saves[0].mock.callCount(), 0);
+  assert.equal(saves[1].mock.callCount(), 0);
+  booked.pop();
+  otherReservation.status = "checked_in";
+  await assert.rejects(swap(), /awaiting check-in/);
+  otherReservation.status = "confirmed";
+  otherReservation.__v = 1;
+  await assert.rejects(swap(), /reservation changed/);
+  assignment.other.expected_version = 1;
+  await swap();
+  assert.equal(reservation.rooms[0].room_number, "103");
+  assert.equal(otherReservation.rooms[0].room_number, "101");
+  assert.deepEqual(reservation.check_out, firstBefore.check_out);
+  assert.deepEqual(otherReservation.check_out, secondBefore.check_out);
+  assert.deepEqual(reservation.financial_summary.toObject(), firstBefore.financial_summary);
+  assert.deepEqual(otherReservation.financial_summary.toObject(), secondBefore.financial_summary);
+  assert.ok(saves.every(item => item.mock.callCount() === 1));
+  assert.deepEqual(audit.mock.calls.map(call => call.arguments[0][0].action), ["reservation_rooms_swapped", "reservation_rooms_swapped"]);
 });
 
 test("rejects the particular sold-out night, not the sum across a stay", async (t) => {
@@ -242,17 +349,6 @@ test("same-day requests still undergo a capacity check", async (t) => {
   await assert.rejects(validate({ checkOut: date("2026-10-20") }), /0 sellable.*2026-10-20/);
 });
 
-test("still prevents conflicts with a cross-booked physical room", async (t) => {
-  const first = new mongoose.Types.ObjectId();
-  const second = new mongoose.Types.ObjectId();
-  const { validate } = setup(t, {
-    physicalRooms: [{ _id: first, room_number: "101" }, { _id: second, room_number: "102" }],
-    links: [{ room_a_id: first, room_b_id: second, room_a_number: "101", room_b_number: "102" }],
-    reservations: [booking("2026-10-21", "2026-10-22", { reservation_no: "RES-OTHER", rooms: [room({ physical_room_id: second, room_number: "102" })] })]
-  });
-  await assert.rejects(validate({ rooms: [room({ physical_room_id: first })] }), /cross-booked room 102.*RES-OTHER/);
-});
-
 test("does not pool capacity across different room types", async (t) => {
   const standardType = new RoomType({ _id: typeId, property_id: propertyId, name: "Standard", active: true, maximum_adults: 2, maximum_children: 2, physical_rooms: [{ room_number: "101" }, { room_number: "102" }] });
   const otherType = new RoomType({ _id: new mongoose.Types.ObjectId(), property_id: propertyId, name: "Deluxe", active: true, maximum_adults: 2, maximum_children: 2, physical_rooms: [{ room_number: "201" }] });
@@ -316,17 +412,6 @@ for (const existingDayUse of [false, true]) {
     }), /Room 101 is already booked/);
   });
 }
-
-test("cross-booked rooms detect same-day use", async (t) => {
-  const first = new mongoose.Types.ObjectId();
-  const second = new mongoose.Types.ObjectId();
-  const { validate } = setup(t, {
-    physicalRooms: [{ _id: first, room_number: "101" }, { _id: second, room_number: "102" }],
-    links: [{ room_a_id: first, room_b_id: second, room_a_number: "101", room_b_number: "102" }],
-    reservations: [booking("2026-10-20", "2026-10-20", { is_day_room: true, reservation_no: "DAY-OTHER", rooms: [room({ physical_room_id: second, room_number: "102" })] })]
-  });
-  await assert.rejects(validate({ checkOut: date("2026-10-20"), isDayRoom: true, rooms: [room({ physical_room_id: first })] }), /cross-booked room 102.*DAY-OTHER/);
-});
 
 test("day use respects a group hold starting on the same date", async (t) => {
   const { validate } = setup(t, { capacity: 1, blocks: [block("2026-10-20", "2026-10-22")] });

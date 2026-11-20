@@ -1,7 +1,9 @@
 const express = require("express");
 const AuditLog = require("../db_models/booking-log.model");
+const NightAudit = require("../db_models/night-audit.model");
 const { propertyRole } = require("../services/property-access.service");
 const { ENTITY_TYPES, EXPORT_LIMIT, activityFilter, timezoneFor, pageNumber, serializeLog, exportCsv } = require("../services/activity-log.service");
+const { dateKey } = require("../services/night-audit.service");
 
 const router = express.Router();
 router.use((req, res, next) => {
@@ -33,7 +35,18 @@ router.get("/", run(async (req, res) => {
     AuditLog.find(filter).select(projection).sort(order).skip((page - 1) * limit).limit(limit).lean(),
     AuditLog.countDocuments(filter)
   ]);
-  res.json({ logs: logs.map(serializeLog), total, page, limit, pages: Math.max(1, Math.ceil(total / limit)), timezone, entity_types: ENTITY_TYPES });
+  const isAuditReview = log => log.entity_type === "night_audit" && log.action === "night_audit_finance_review";
+  const auditIds = [...new Set(logs.filter(isAuditReview).map(log => String(log.entity_id)))];
+  const audits = auditIds.length
+    ? await NightAudit.find({ property_id: property.property_id, _id: { $in: auditIds } }).select("business_date").lean()
+    : [];
+  const datesByAuditId = new Map(audits.map(audit => [String(audit._id), dateKey(audit.business_date)]));
+  const entries = logs.map(log => {
+    const entry = serializeLog(log);
+    const businessDate = isAuditReview(log) && datesByAuditId.get(entry.entity_id);
+    return businessDate ? { ...entry, audit_business_date: businessDate } : entry;
+  });
+  res.json({ logs: entries, total, page, limit, pages: Math.max(1, Math.ceil(total / limit)), timezone, entity_types: ENTITY_TYPES });
 }));
 
 module.exports = router;

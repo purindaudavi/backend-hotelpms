@@ -7,6 +7,11 @@ const router = express.Router();
 router.get("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const query = { property_id: propertyId };
+  if (req.query.mine === "true") {
+    if (!req.workspaceUser?._id) throw httpError(403, "Sign in to view your financial activity.");
+    query["created_by.user_id"] = String(req.workspaceUser._id);
+    res.set("Cache-Control", "private, no-store");
+  }
   const status = normalizeEnum(req.query.status);
   const direction = normalizeEnum(req.query.direction);
   const sourceType = normalizeEnum(req.query.source_type);

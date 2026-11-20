@@ -25,8 +25,6 @@ The change covers:
 - Room-type capacity and specific physical-room assignment, on create and edit.
 - Day use versus day use, day use versus overnight stays, and range boundaries.
 - Active group holds and group activation against existing day use.
-- Existing cross-booking links, and attempts to create links between rooms that
-  already have conflicting day-use reservations.
 - The existing property transaction guard for simultaneous requests.
 - Check-in: a day-use reservation may be checked in only on its arrival business
   date, not on a later day.
@@ -42,7 +40,7 @@ and ensure the room list/reservation data are current.
 
 1. In Room & Rates -> Rooms, configure a test room type with exactly one active,
    sellable physical room, such as 101. Ensure no other bookings, active group
-   holds or cross-booking restrictions affect the example dates.
+   holds affect the example dates.
 2. Configure an active Room Only rate plan covering the test dates if required
    by the reservation form. Use future dates relative to the property's business
    date if needed; shift all example dates together.

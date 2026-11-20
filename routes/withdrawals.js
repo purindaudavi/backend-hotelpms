@@ -21,6 +21,11 @@ router.get("/recipients", asyncHandler(async (req, res) => {
 router.get("/", asyncHandler(async (req, res) => {
   const propertyId = requirePropertyId(req);
   const query = { property_id: propertyId };
+  if (req.query.mine === "true") {
+    if (!req.workspaceUser?._id) throw httpError(403, "Sign in to view your withdrawals.");
+    query.recipient_user_id = objectId(req.workspaceUser._id, "recipient_user_id");
+    res.set("Cache-Control", "private, no-store");
+  }
   const status = normalizeEnum(req.query.status);
   if (status && status !== "all") query.status = status;
   const currency = String(req.query.currency || "").trim().toUpperCase();

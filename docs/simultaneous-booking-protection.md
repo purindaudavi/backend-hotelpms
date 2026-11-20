@@ -34,7 +34,6 @@ The shared wrapper covers:
 - Business block edits, activation, release/cancellation and allocation pickup.
 - The simulated/test-channel reservation importer.
 - Room-type and physical-room catalog changes, including operational status.
-- Cross-booking relationship creation, activation/deactivation and deletion.
 - Housekeeping task mutations affecting room readiness.
 
 Existing transaction-backed booking metadata/payment operations also use the
@@ -61,8 +60,8 @@ Use a test property and synthetic guests. Do not test against real customer
 reservations. Restart the backend, then refresh both browser sessions.
 
 1. Create a room type with exactly **one active sellable room**. It must not be
-   under maintenance or out of order. Ensure there are no existing reservations,
-   group holds or cross-booking restrictions for the test dates.
+   under maintenance or out of order. Ensure there are no existing reservations
+   or group holds for the test dates.
 2. Configure a valid Room Only rate plan if the reservation form requires one.
 3. Open the same test property in two browser sessions, both signed in with
    access to that property. This can be two browsers or two staff accounts.

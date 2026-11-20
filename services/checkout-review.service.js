@@ -67,9 +67,10 @@ function buildCheckoutReview(reservation, { invoices = [], payments = [], credit
       total: reservationTotal, paid: money(Math.max(paid - refunded, 0)), credited: 0,
       balance_due: money(Math.max(reservationTotal - Math.max(paid - refunded, 0), 0)), refund_due: money(Math.max(paid - refunded - reservationTotal, 0)), lines: [] });
   } else {
-    // Never count accommodation twice, or silently consume an unallocated deposit.
+    // An intentional extra invoice is collectible, but cannot cover a gap in the normal stay billing.
     if (relevant.some((record) => !record.invoice_id)) issues.push("There are unallocated reservation payments. Ask an owner/administrator to reconcile them with the guest invoices.");
-    const billed = money(rows.filter((row) => row.currency === reservationCurrency).reduce((sum, row) => sum + row.total, 0));
+    const billed = money(active.filter((invoice) => !invoice.stay_override && currency(invoice.currency) === reservationCurrency)
+      .reduce((sum, invoice) => sum + Number(invoice.grand_total || 0), 0));
     if (billed < reservationTotal) issues.push(`The saved reservation total exceeds linked invoice totals by ${reservationCurrency} ${money(reservationTotal - billed).toFixed(2)}. Ask an owner/administrator to reconcile the charges.`);
   }
   const totalsByCurrency = [];

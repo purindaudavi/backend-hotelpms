@@ -40,3 +40,60 @@ test("Finance review status is separate from audit close status", async () => {
   await audit.validate();
   assert.equal(audit.status, "closed"); assert.equal(audit.next_business_date.toISOString().slice(0, 10), "2026-10-31");
 });
+
+test("saving a follow-up Night Audit verification requires a reason and keeps the prior review", async t => {
+  const express = require("express");
+  const Property = require("../db_models/property.model");
+  const AuditLog = require("../db_models/booking-log.model");
+  const financeId = new mongoose.Types.ObjectId();
+  const property = { property_id: "verification-test", status: "active", member_ids: [financeId], staff_roles: [{ user_id: financeId, role: "finance" }] };
+  const audit = new NightAudit({ property_id: property.property_id, business_date: "2026-10-30",
+    status: "closed", closed_at: new Date("2026-10-31T00:30:00Z"), next_business_date: "2026-10-31", close_summary: { receipt_totals: [] }, version: 0 });
+  const query = record => ({ session: async () => record });
+  t.mock.method(Property, "findOne", () => query(property));
+  t.mock.method(NightAudit, "findOne", () => query(audit));
+  t.mock.method(audit, "save", async () => { await audit.validate(); audit.version++; return audit; });
+  t.mock.method(require("../services/inventory-transaction.service"), "withInventoryTransaction", (_id, work) => work(null));
+  const entries = [];
+  t.mock.method(AuditLog, "create", async ([entry]) => {
+    const log = new AuditLog(entry);
+    await log.validate();
+    entries.push(log);
+    return [log];
+  });
+
+  const app = express();
+  app.use(express.json(), (req, _res, next) => {
+    req.authorizedProperty = property;
+    req.workspaceUser = { _id: financeId };
+    next();
+  });
+  app.use("/night-audit", require("../routes/night-audit-v2"));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise(resolve => server.once("listening", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const verify = (version, note, status = "reviewed") => fetch(`http://127.0.0.1:${server.address().port}/night-audit/${audit.id}/finance-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-user-id": String(financeId), "x-user-name": "Test Finance" },
+    body: JSON.stringify({ version, status, note, confirmed: true })
+  });
+
+  assert.equal((await verify(0, "", "flagged")).status, 400);
+  const first = await verify(0, "");
+  assert.equal(first.status, 200, await first.text());
+  const rejected = await verify(1, "  ");
+  assert.equal(rejected.status, 400);
+  assert.match((await rejected.json()).message, /follow-up reason/);
+  assert.equal(entries.length, 1);
+  const flagged = await verify(1, "Receipt needs investigation", "flagged");
+  assert.equal(flagged.status, 200);
+  const longReason = "Reviewed after checking the receipt. ".repeat(70).trim();
+  const reviewed = await verify(2, longReason);
+  assert.equal(reviewed.status, 200);
+  const { night_audit: saved } = await reviewed.json();
+  assert.deepEqual(saved.finance_review_history.map(review => review.status), ["reviewed", "flagged", "reviewed"]);
+  assert.equal(saved.finance_review_note, longReason);
+  assert.equal(saved.status, "closed");
+  assert.deepEqual(saved.snapshot, { receipt_totals: [] });
+  assert.equal(entries.length, 3);
+});

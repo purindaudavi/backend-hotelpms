@@ -28,7 +28,7 @@ test("receipt validation accepts bounded PDF/image bytes and rejects active cont
 test("money request API enforces requester/tenant scope, owner-only transitions and exactly one payment; settlement never pays twice", async t => {
   const ids = Object.fromEntries(["owner", "administrator", "finance", "front_desk", "housekeeping", "outsider"].map(role => [role, new mongoose.Types.ObjectId()]));
   const property = { property_id: "requests-test", status: "active", owner_id: ids.owner, member_ids: [ids.administrator, ids.finance, ids.front_desk, ids.housekeeping], administrator_ids: [ids.administrator], staff_roles: ["finance", "front_desk", "housekeeping"].map(role => ({ user_id: ids[role], role })) };
-  const records = [], ledger = [], costs = []; let sequence = 0, queue = Promise.resolve();
+  const records = [], ledger = [], costs = [], notifications = []; let sequence = 0, queue = Promise.resolve();
   const match = (record, filter) => Object.entries(filter).every(([key, value]) => String(record[key]) === String(value));
   const query = value => ({ session() { return this; }, select() { return this; }, sort() { return this; }, skip() { return this; }, limit() { return this; }, then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); } });
   t.mock.method(Property, "findOne", filter => query(filter.property_id === property.property_id ? property : null));
@@ -41,7 +41,7 @@ test("money request API enforces requester/tenant scope, owner-only transitions 
   t.mock.method(require("../services/financial-document.service"), "nextDocumentNumber", async ({ documentType }) => `${documentType}-${++sequence}`);
   t.mock.method(require("../services/financial-transaction.service"), "postFinancialTransaction", async data => { if (!ledger.some(t => t.sourceType === data.sourceType && String(t.sourceId) === String(data.sourceId))) ledger.push(data); });
   t.mock.method(require("../services/booking-audit.service"), "writeAuditLog", async () => {});
-  t.mock.method(require("../db_models/money-request-event.model"), "create", async () => []);
+  t.mock.method(require("../db_models/money-request-event.model"), "create", async events => { notifications.push(...events); return []; });
   t.mock.method(require("../services/money-request.service"), "recordRequestCost", async (record, amount) => { if (amount > 0) costs.push(amount); record.expense_id = new mongoose.Types.ObjectId(); });
   t.mock.method(require("../services/recorded-funds.service"), "recordedFunds", async () => [{ currency: "LKR", received: 8000, paid_out: ledger.reduce((s,t) => s + (t.direction === "out" ? t.amount : -t.amount), 0), balance: 8000 - ledger.reduce((s,t) => s + (t.direction === "out" ? t.amount : -t.amount), 0) }]);
   const app = express(); app.use(express.json()); app.use((req, res, next) => { const role = req.get("x-test-role") || "front_desk"; req.workspaceUser = { _id: ids[role], name: role, email: `${role}@example.test` }; req.propertyRole = propertyRole(property, req.workspaceUser); next(); });
@@ -57,6 +57,7 @@ test("money request API enforces requester/tenant scope, owner-only transitions 
   assert.equal((await call("administrator", "GET")).body.requests.length, 4);
   assert.equal((await call("outsider", "GET")).status, 403);
   const id = records[0]._id;
+  assert.equal((await call("front_desk", "POST", `/${id}/report-spending`, { version: 0, amount_spent: 800 })).status, 409);
   assert.equal((await call("housekeeping", "GET", `/${id}`)).status, 404);
   assert.equal((await call("front_desk", "GET", "/funds")).status, 403);
   assert.equal((await call("administrator", "GET", "/funds")).body.balances[0].balance, 8000);
@@ -71,6 +72,31 @@ test("money request API enforces requester/tenant scope, owner-only transitions 
   const receipt = { name: "proof.pdf", content_type: "application/pdf", data: Buffer.from("%PDF-1.4\nReceipt").toString("base64") };
   result = await call("front_desk", "POST", `/${id}/receipts`, receipt); assert.equal(result.status, 201);
   assert.equal(result.body.request.receipts[0].data, undefined); assert.equal(ledger.length, 1);
+  const reportPath = `/${id}/report-spending`;
+  const report = { version: result.body.request.version, amount_spent: 800, note: "Cleaning supplies bought", receipt };
+  assert.equal((await call("housekeeping", "POST", reportPath, report)).status, 404);
+  assert.equal((await call("owner", "POST", reportPath, report)).status, 403);
+  for (const amount_spent of [null, "", -1, 1000.01, 100.001]) {
+    assert.equal((await call("front_desk", "POST", reportPath, { ...report, amount_spent })).status, 400);
+  }
+  assert.equal((await call("front_desk", "POST", reportPath, { ...report, receipt: { ...receipt, content_type: "text/html" } })).status, 400);
+  assert.equal(records[0].receipts.length, 1);
+  result = await call("front_desk", "POST", reportPath, report);
+  assert.equal(result.status, 200);
+  assert.equal(result.body.request.status, "paid");
+  assert.equal(result.body.request.actual_spent, undefined);
+  const submitted = result.body.request.spending_report;
+  assert.equal(submitted.amount_spent, 800);
+  assert.equal(submitted.unused_amount, 200);
+  assert.equal(result.body.request.receipts[1]._id, submitted.receipt_id);
+  assert.equal(result.body.request.receipts[1].data, undefined);
+  assert.equal((await call("owner", "GET", "/funds")).body.balances[0].balance, 7000);
+  assert.equal(costs.length, 0);
+  assert.ok(notifications.some(event => event.action === "spending_reported" && event.audience_ids.includes(String(ids.owner))));
+  assert.equal((await call("front_desk", "POST", reportPath, report)).status, 409);
+  result = await call("front_desk", "POST", reportPath, { version: result.body.request.version, amount_spent: 800, receipt_id: submitted.receipt_id });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.request.receipts.length, 2);
   const version = result.body.request.version;
   assert.equal((await call("owner", "POST", `/${id}/settle`, { version, actual_spent: 800, note: "Receipt checked", return_confirmed: false })).status, 400);
   result = await call("owner", "POST", `/${id}/settle`, { version, actual_spent: 800, note: "Receipt checked, change received", return_confirmed: true });
@@ -78,5 +104,6 @@ test("money request API enforces requester/tenant scope, owner-only transitions 
   assert.equal((await call("owner", "GET", "/funds")).body.balances[0].balance, 7200);
   assert.equal((await call("owner", "POST", `/${id}/settle`, { version, actual_spent: 800, note: "Duplicate attempt", return_confirmed: true })).status, 409);
   assert.equal(costs.length, 1); assert.equal(ledger.length, 2);
+  assert.equal((await call("front_desk", "POST", reportPath, { version: result.body.request.version, amount_spent: 800 })).status, 409);
   assert.equal((await call("owner", "GET", `/${id}?property_id=other`)).status, 403);
 });

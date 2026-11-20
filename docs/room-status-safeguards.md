@@ -24,8 +24,8 @@ They do not restrict or replace the reservation-status dropdown.
   active/tentative groups cannot be disabled/deleted.
 - Past reservation/move history prevents hard deletion or renaming of referenced
   room identities. Disabling is allowed once there is no active/future conflict.
-  Saved rate references protect room-type identities; housekeeping history and
-  cross-booking links also prevent destructive deletion/renaming.
+  Saved rate references protect room-type identities. Housekeeping history also
+  prevents deletion or renaming.
 - The `force=true` deletion bypass was removed. The same safety checks apply to
   every authorized caller, including owners/administrators. This is not a new
   staff-role permission system; existing property authorization is unchanged.

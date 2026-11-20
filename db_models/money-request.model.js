@@ -7,6 +7,14 @@ const ReceiptSchema = new mongoose.Schema({
   data: { type: Buffer, select: false },
   uploaded_by: ActorSchema, uploaded_at: { type: Date, default: Date.now }
 });
+const SpendingReportSchema = new mongoose.Schema({
+  amount_spent: { type: Number, required: true, min: 0 },
+  unused_amount: { type: Number, required: true, min: 0 },
+  note: { type: String, trim: true, maxlength: 1000 },
+  receipt_id: mongoose.Schema.Types.ObjectId,
+  submitted_by: { type: ActorSchema, required: true },
+  submitted_at: { type: Date, required: true }
+}, { _id: false });
 const Schema = new mongoose.Schema({
   property_id: { type: String, required: true, index: true },
   request_no: { type: String, required: true },
@@ -27,6 +35,7 @@ const Schema = new mongoose.Schema({
   settled_at: Date, settled_by: ActorSchema, actual_spent: Number, returned_amount: Number,
   settlement_note: { type: String, trim: true, maxlength: 1000 },
   expense_id: mongoose.Schema.Types.ObjectId,
+  spending_report: { type: SpendingReportSchema, default: undefined },
   receipts: { type: [ReceiptSchema], default: [], validate: v => v.length <= 3 },
   history: [{ action: String, actor: ActorSchema, note: String, at: { type: Date, default: Date.now } }]
 }, { timestamps: { createdAt: "created_at", updatedAt: "updated_at" }, optimisticConcurrency: true });

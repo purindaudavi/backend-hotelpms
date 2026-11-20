@@ -40,9 +40,8 @@ and **staff decisions for no-shows**, not automatic no-show/cancellation/fees.
 
 Permissions are checked server-side and again inside the transaction using fresh
 membership. Existing Front Desk permission grant/removal UI is retained. Old
-`review`, `post-room-revenue`, `generate-reports`, `notes`, `complete`, etc. URLs
-cannot bypass the new runner. `routes/night-audit.js` is only a compatibility
-import of V2; app.js mounts V2 directly.
+`review`, `post-room-revenue`, `generate-reports`, `notes`, and `complete` URLs
+cannot bypass the runner. `app.js` mounts `routes/night-audit-v2.js` directly.
 
 ## Charge accounting and boundaries
 

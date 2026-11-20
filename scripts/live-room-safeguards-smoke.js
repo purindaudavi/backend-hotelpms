@@ -10,7 +10,6 @@ const RoomType = require("../db_models/rooms.model");
 const Property = require("../db_models/property.model");
 const Reservation = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
-const CrossBooking = require("../db_models/crossbooking.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
 const { HousekeepingTask, HousekeepingActivity } = require("../db_models/housecleaning.model");
 const InventoryGuard = require("../db_models/inventory-guard.model");
@@ -134,10 +133,21 @@ async function main() {
     }
     {
       const item = await fixture();
-      await CrossBooking.create({ property_id: item.propertyId, room_a_id: item.type.physical_rooms[0]._id, room_b_id: item.type.physical_rooms[1]._id,
-        room_a_number: "101", room_b_number: "102", room_a_type_id: item.type._id, room_b_type_id: item.type._id, room_a_type_name: item.type.name, room_b_type_name: item.type.name });
-      verify409(await request(item.propertyId, physicalPath(item), "DELETE"), /cross-booking/);
-      console.log("PASS: cross-booking links cannot be orphaned by room deletion.");
+      const legacyLinks = mongoose.connection.collection("cross_bookings");
+      const { insertedId } = await legacyLinks.insertOne({
+        property_id: item.propertyId, room_a_id: item.type.physical_rooms[0]._id, room_b_id: item.type.physical_rooms[1]._id,
+        room_a_number: "101", room_b_number: "102", room_a_type_id: item.type._id, room_b_type_id: item.type._id,
+        room_a_type_name: item.type.name, room_b_type_name: item.type.name, active: true
+      });
+      try {
+        const result = await request(item.propertyId, physicalPath(item), "DELETE");
+        assert.equal(result.status, 200, JSON.stringify(result));
+        assert.equal((await RoomType.findById(item.type._id)).physical_rooms.length, 1);
+        assert.ok(await legacyLinks.findOne({ _id: insertedId, property_id: item.propertyId }));
+      } finally {
+        await legacyLinks.deleteOne({ _id: insertedId, property_id: item.propertyId });
+      }
+      console.log("PASS: a retired room link does not prevent deleting an unused room.");
     }
     {
       const item = await fixture(); await HousekeepingTask.create({ property_id: item.propertyId, physical_room_id: item.type.physical_rooms[0]._id,
@@ -180,7 +190,7 @@ async function main() {
     try {
       if (mongoose.connection.readyState === 1 && properties.length) {
         assert.ok(properties.every((id) => id.startsWith(`${namespace}-`) && /^\d+$/.test(id.slice(namespace.length + 1))));
-        for (const Model of [Reservation, BusinessBlock, CrossBooking, RatePlan, DailyRate, HousekeepingTask, HousekeepingActivity, RoomType, Property, Guest, BookingAuditLog, DocumentCounter]) {
+        for (const Model of [Reservation, BusinessBlock, RatePlan, DailyRate, HousekeepingTask, HousekeepingActivity, RoomType, Property, Guest, BookingAuditLog, DocumentCounter]) {
           const filter = { property_id: { $in: properties } }; await Model.deleteMany(filter); assert.equal(await Model.countDocuments(filter), 0);
         }
         await InventoryGuard.deleteMany({ _id: { $in: properties } });

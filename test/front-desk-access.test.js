@@ -16,13 +16,13 @@ const AuditLog = require("../db_models/booking-log.model");
 
 test("Front Desk API policy explicitly allows operations and denies privileged paths", () => {
   const allowed = [
-    ["GET", "/rooms"], ["GET", "/rates"], ["POST", "/rates/quote"], ["GET", "/housekeeping"], ["GET", "/cross-bookings"],
+    ["GET", "/rooms"], ["GET", "/rates"], ["POST", "/rates/quote"], ["GET", "/housekeeping"],
     ["POST", "/housekeeping/rooms/room-one/assign"], ["GET", "/bookings/reservations/booking-one/checkout-review"],
     ["POST", "/housekeeping/rooms/room-one/request"],
     ["GET", "/properties/hotel-one"], ["GET", "/properties/hotel-one/theme"], ["GET", "/properties/hotel-one/my-access"],
     ["GET", "/guests"], ["POST", "/guests"], ["PATCH", "/guests/guest-one"],
     ["POST", "/bookings/reservations"], ["PATCH", "/bookings/reservations/booking-one"],
-    ...["confirm", "check-in", "check-out", "cancel", "no-show", "room-moves", "occupants", "attachments", "payments"].map((action) => ["POST", `/bookings/reservations/booking-one/${action}`]),
+    ...["confirm", "check-in", "check-out", "cancel", "no-show", "room-moves", "room-reassignment", "room-swap", "occupants", "attachments", "payments"].map((action) => ["POST", `/bookings/reservations/booking-one/${action}`]),
     ["GET", "/bookings/reservations/booking-one/attachments/file-one/file"],
     ["GET", "/invoices"], ["GET", "/invoices/invoice-one"], ["POST", "/invoices/invoice-one/payments"],
     ["GET", "/notifications"], ["PATCH", "/notifications/booking:record-one/read"], ["POST", "/notifications/read-all"],
@@ -53,6 +53,12 @@ test("Front Desk API policy explicitly allows operations and denies privileged p
   check(["POST", "/bookings/reservations/booking-one/payments"], false, { status: "refunded" });
   check(["POST", "/invoices/invoice-one/payments"], false, { status: "voided" });
   assert.ok(!permissionsForRole("front_desk").includes("staff.manage"));
+  for (const role of ["finance", "housekeeping"]) {
+    for (const action of ["room-reassignment", "room-swap"]) {
+      assert.equal(authorizePropertyRequest({ propertyRole: role, method: "POST", path: `/bookings/reservations/booking-one/${action}` },
+        { status: (status) => ({ json: () => status }) }, () => 200), 403);
+    }
+  }
 });
 
 function booking() {
@@ -152,7 +158,7 @@ test("HTTP property role assignment, restricted reads/writes, role changes and r
   for (const Model of [Reservation, Invoice, Guest]) t.mock.method(Model, "countDocuments", () => query(0));
   t.mock.method(AuditLog, "create", async (values) => values);
   t.mock.method(require("../db_models/inventory-guard.model"), "updateOne", async () => ({ matchedCount: 1 }));
-  t.mock.method(mongoose, "startSession", async () => ({ withTransaction: async (work) => work(), endSession: async () => {} }));
+  t.mock.method(mongoose, "startSession", async () => ({ withTransaction: async (work) => work(), inTransaction: () => true, endSession: async () => {} }));
   const { app } = require("../app");
   const server = app.listen(0, "127.0.0.1"); await new Promise((resolve) => server.once("listening", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -172,6 +178,49 @@ test("HTTP property role assignment, restricted reads/writes, role changes and r
     ["/bookings/reservations/booking-one/payments", "POST", { status: "refunded", amount: 100 }],
     ["/bookings/reservations/booking-one", "DELETE"]
   ]) assert.equal((await request(staff, path, method, body)).status, 403, `${method} ${path}`);
+
+  const roomType = new RoomType({ property_id: property.property_id, name: "Standard", physical_rooms: [
+    { room_number: "T102" }, { room_number: "T103" }
+  ] });
+  const [source, destination] = roomType.physical_rooms;
+  const reservation = new Reservation({ property_id: property.property_id, reservation_no: "RES-REASSIGN", status: "confirmed",
+    check_in: "2026-11-22", check_out: "2026-11-24", booker: { name: "Test Guest" },
+    rooms: [{ room_type_id: roomType._id, room_type_name: roomType.name, physical_room_id: source._id, room_number: source.room_number }]
+  });
+  RoomType.find.mock.mockImplementation(() => query([roomType]));
+  t.mock.method(Reservation, "findOne", (filter) => {
+    assert.equal(filter.property_id, property.property_id);
+    return query(String(reservation._id) === filter._id ? reservation : null);
+  });
+  t.mock.method(reservation, "save", async () => reservation);
+  t.mock.method(Invoice, "findOne", () => query(null));
+  t.mock.method(require("../db_models/business-block.model"), "find", () => query([]));
+  const reassignmentPath = `/bookings/reservations/${reservation._id}/room-reassignment`;
+  const reassignment = { room_line_id: String(reservation.rooms[0]._id),
+    from_physical_room_id: String(source._id), to_physical_room_id: String(destination._id), expected_version: 0 };
+  const moved = await request(staff, reassignmentPath, "POST", reassignment);
+  assert.equal(moved.status, 200, moved.status === 200 ? undefined : await moved.text());
+  const payload = await moved.json();
+  assert.equal(payload.reservation.reservation_no, "RES-REASSIGN");
+  assert.equal(payload.reservation.rooms[0].room_number, "T103");
+
+  const other = new Reservation({ property_id: property.property_id, reservation_no: "RES-SWAP-OTHER", status: "confirmed",
+    check_in: "2026-11-22", check_out: "2026-11-24", booker: { name: "Other Guest" },
+    rooms: [{ room_type_id: roomType._id, physical_room_id: source._id, room_number: source.room_number }] });
+  Reservation.findOne.mock.mockImplementation(filter => {
+    assert.equal(filter.property_id, property.property_id);
+    assert.equal(filter.deleted_at.$exists, false);
+    return query([reservation, other].find(item => String(item._id) === filter._id));
+  });
+  t.mock.method(other, "save", async () => other);
+  const swapPath = `/bookings/reservations/${reservation._id}/room-swap`;
+  const swap = { room_line_id: String(reservation.rooms[0]._id), from_physical_room_id: String(destination._id), expected_version: 0,
+    other: { reservation_id: String(other._id), room_line_id: String(other.rooms[0]._id), from_physical_room_id: String(source._id), expected_version: 0 } };
+  assert.equal((await request(staff, swapPath, "POST", { ...swap, other: { ...swap.other, reservation_id: String(new mongoose.Types.ObjectId()) } })).status, 404);
+  const swapped = await request(staff, swapPath, "POST", swap);
+  assert.equal(swapped.status, 200, await swapped.clone().text());
+  assert.deepEqual((await swapped.json()).reservations.map(item => item.rooms[0].room_number), ["T102", "T103"]);
+
   assert.equal((await request(admin, `${access}/${staff._id}`, "PATCH", { role: "member" })).status, 200);
   assert.equal(property.staff_roles.length, 0);
   assert.equal((await request(admin, `${access}/${staff._id}`, "PATCH", { role: "front_desk" })).status, 200);
@@ -183,6 +232,7 @@ test("HTTP property role assignment, restricted reads/writes, role changes and r
   assert.equal((await request(owner, `${access}/${staff._id}`, "DELETE")).status, 200);
   assert.equal(property.staff_roles.length, 0);
   assert.equal((await request(staff, "/rooms")).status, 403);
+  assert.equal((await request(staff, reassignmentPath, "POST", reassignment)).status, 403);
   const invalid = new Property({ ...property, staff_roles: [{ user_id: staff._id, role: "front_desk" }] });
   await assert.rejects(invalid.validate(), /Staff roles require/);
 });

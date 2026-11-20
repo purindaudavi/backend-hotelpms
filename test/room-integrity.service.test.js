@@ -5,7 +5,6 @@ const RoomType = require("../db_models/rooms.model");
 const Reservation = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const Property = require("../db_models/property.model");
-const CrossBooking = require("../db_models/crossbooking.model");
 const { RatePlan, DailyRate } = require("../db_models/rates.model");
 const { HousekeepingTask, HousekeepingActivity } = require("../db_models/housecleaning.model");
 const { assertManualOccupancy, assertRemainingCapacity, validateRoomCatalogChange } = require("../services/room-integrity.service");
@@ -20,12 +19,11 @@ function booking(type, overrides = {}) {
   return { reservation_no: "RES-SAFETY", status: "confirmed", check_in: "2026-10-21", check_out: "2026-10-23",
     rooms: [{ room_type_id: type._id, physical_room_id: type.physical_rooms[0]?._id }], ...overrides };
 }
-function stub(t, { reservations = [], blocks = [], links = null, rates = null, tasks = null } = {}) {
+function stub(t, { reservations = [], blocks = [], rates = null, tasks = null } = {}) {
   const query = (value) => ({ session: async (valueSession) => { assert.equal(valueSession, session); return value; } });
   t.mock.method(Property, "findOne", () => query({ business_date: new Date(today) }));
   t.mock.method(Reservation, "find", () => query(reservations));
   t.mock.method(BusinessBlock, "find", () => query(blocks));
-  t.mock.method(CrossBooking, "exists", () => query(links));
   t.mock.method(RatePlan, "exists", () => query(rates));
   t.mock.method(DailyRate, "exists", () => query(null));
   t.mock.method(HousekeepingTask, "exists", () => query(tasks));
@@ -134,12 +132,6 @@ test("group holds protect capacity and pickups are not counted twice", () => {
   assert.doesNotThrow(() => assertRemainingCapacity({ type, reservations: [record], blocks: [group], today }));
   group.allocations[0].released_quantity = 1;
   assert.doesNotThrow(() => assertRemainingCapacity({ type, reservations: [], blocks: [group], today }));
-});
-
-test("cross-booking and housekeeping references prevent destructive catalog changes", async (t) => {
-  const type = fixture(); const before = type.toObject();
-  stub(t, { links: { _id: "link" } });
-  await assert.rejects(change(before, type, type.physical_rooms[0]._id, { deleting: true }), /cross-booking links/);
 });
 
 test("saved rates prevent deletion of the referenced room type", async (t) => {

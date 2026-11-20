@@ -5,7 +5,6 @@ const {
 } = require("../db_models/booking.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
-const CrossBooking = require("../db_models/crossbooking.model");
 const { HousekeepingActivity } = require("../db_models/housecleaning.model");
 const { DAY_MS, inventoryDay, inventoryRange, reservationOverlapDateQuery, physicalAssignments } = require("./booking-inventory-dates.service");
 
@@ -17,6 +16,7 @@ async function validateReservationInventory({
   rooms,
   excludeReservationId,
   linkedBusinessBlockId,
+  proposedRoomsByReservation,
   session
 }) {
   const range = inventoryRange({ check_in: checkIn, check_out: checkOut, is_day_room: isDayRoom });
@@ -37,12 +37,12 @@ async function validateReservationInventory({
 
   const overlappingReservations = await Reservation.find(
     overlapReservationQuery({ propertyId, checkIn, checkOut, excludeReservationId }),
-    { rooms: 1, room_moves: 1, reservation_no: 1, business_block_id: 1, check_in: 1, check_out: 1, is_day_room: 1 }
+    { rooms: 1, room_moves: 1, business_block_id: 1, check_in: 1, check_out: 1, is_day_room: 1 }
   ).session(session || null);
 
   const roomTypeMap = new Map(roomTypes.map((roomType) => [String(roomType._id), roomType]));
   const requestedByType = new Map();
-  const assignedPhysicalRooms = new Map();
+  const assignedPhysicalRoomIds = new Set();
 
   for (const room of rooms) {
     const roomType = roomTypeMap.get(String(room.room_type_id));
@@ -78,16 +78,16 @@ async function validateReservationInventory({
       throw conflict(`Room ${physicalRoom.room_number} is ${physicalRoom.operational_status.replaceAll("_", " ")}. Select another room.`);
     }
     room.room_number = physicalRoom.room_number;
-    if (assignedPhysicalRooms.has(String(physicalRoom._id))) {
+    if (assignedPhysicalRoomIds.has(String(physicalRoom._id))) {
       throw conflict("The same physical room cannot be assigned twice.");
     }
     const assignmentStart = room.current_assignment_from ? Math.max(range.start, inventoryDay(room.current_assignment_from)) : range.start;
-    assignedPhysicalRooms.set(
-      String(physicalRoom._id),
-      { room_number: physicalRoom.room_number, start: assignmentStart }
-    );
+    assignedPhysicalRoomIds.add(String(physicalRoom._id));
 
-    if (overlappingReservations.some((reservation) => physicalAssignments(reservation).some((assignment) =>
+    if (overlappingReservations.some((reservation) => physicalAssignments(proposedRoomsByReservation?.has(String(reservation._id))
+      ? { check_in: reservation.check_in, check_out: reservation.check_out, is_day_room: reservation.is_day_room,
+          room_moves: reservation.room_moves, rooms: proposedRoomsByReservation.get(String(reservation._id)) }
+      : reservation).some((assignment) =>
       String(assignment.physical_room_id) === String(physicalRoom._id) && assignment.start < range.end && assignment.end > assignmentStart
     ))) {
       throw conflict(
@@ -95,16 +95,6 @@ async function validateReservationInventory({
       );
     }
   }
-
-  await validateCrossBookingConflicts({
-    propertyId,
-    checkIn,
-    checkOut,
-    assignedPhysicalRooms,
-    overlappingReservations,
-    excludeReservationId,
-    session
-  });
 
   const blockQuery = {
     property_id: propertyId,
@@ -188,86 +178,6 @@ async function validateReservationInventory({
 function occupiesInventoryDay(record, night) {
   const { start, end } = inventoryRange(record);
   return start <= night && night < end;
-}
-
-async function validateCrossBookingConflicts({
-  propertyId,
-  checkIn,
-  checkOut,
-  assignedPhysicalRooms,
-  overlappingReservations,
-  excludeReservationId,
-  session
-}) {
-  const assignedIds = [...assignedPhysicalRooms.keys()];
-  if (!assignedIds.length) return;
-
-  const objectIds = assignedIds.map((id) => new mongoose.Types.ObjectId(id));
-  const links = await CrossBooking.find({
-    property_id: propertyId,
-    active: true,
-    $or: [
-      { room_a_id: { $in: objectIds } },
-      { room_b_id: { $in: objectIds } }
-    ]
-  }).session(session || null);
-  if (!links.length) return;
-
-  const assignedSet = new Set(assignedIds);
-  for (const link of links) {
-    const roomAId = String(link.room_a_id);
-    const roomBId = String(link.room_b_id);
-    if (assignedSet.has(roomAId) && assignedSet.has(roomBId)) {
-      throw conflict(
-        `Rooms ${link.room_a_number} and ${link.room_b_number} are cross-booked and cannot be assigned together.`
-      );
-    }
-  }
-
-  const linkedIds = new Set();
-  links.forEach((link) => {
-    const roomAId = String(link.room_a_id);
-    const roomBId = String(link.room_b_id);
-    if (assignedSet.has(roomAId)) linkedIds.add(roomBId);
-    if (assignedSet.has(roomBId)) linkedIds.add(roomAId);
-  });
-  if (!linkedIds.size) return;
-
-  const range = inventoryRange({ check_in: checkIn, check_out: checkOut });
-  const hasLinkedConflict = (assignment) => assignment.start < range.end && links.some((link) => {
-    const a = String(link.room_a_id);
-    const b = String(link.room_b_id);
-    const id = String(assignment.physical_room_id);
-    const selected = id === a ? assignedPhysicalRooms.get(b) : id === b ? assignedPhysicalRooms.get(a) : null;
-    return selected && assignment.end > selected.start;
-  });
-  const conflictingReservation = overlappingReservations.find((reservation) => physicalAssignments(reservation).some(hasLinkedConflict));
-  if (!conflictingReservation) return;
-
-  const conflictingRoom = physicalAssignments(conflictingReservation).find(hasLinkedConflict);
-  const conflictingRoomId = String(conflictingRoom?.physical_room_id || "");
-  const link = links.find((candidate) => {
-    const roomAId = String(candidate.room_a_id);
-    const roomBId = String(candidate.room_b_id);
-    return (
-      (assignedSet.has(roomAId) && roomBId === conflictingRoomId) ||
-      (assignedSet.has(roomBId) && roomAId === conflictingRoomId)
-    );
-  });
-  const selectedRoomNumber = link
-    ? assignedSet.has(String(link.room_a_id))
-      ? link.room_a_number
-      : link.room_b_number
-    : "selected room";
-  const linkedRoomNumber = conflictingRoom?.room_number ||
-    (link && conflictingRoomId === String(link.room_a_id)
-      ? link.room_a_number
-      : link?.room_b_number) ||
-    "linked room";
-
-  throw conflict(
-    `Room ${selectedRoomNumber} overlaps a booking in cross-booked room ${linkedRoomNumber} (${conflictingReservation.reservation_no}). Refresh availability and try again.`
-  );
 }
 
 async function validateBusinessBlockInventory({

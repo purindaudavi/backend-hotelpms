@@ -1,6 +1,7 @@
 const test = require("node:test"), assert = require("node:assert/strict"), mongoose = require("mongoose"), jwt = require("jsonwebtoken");
 const Property = require("../db_models/property.model"), User = require("../db_models/user.model"), Reservation = require("../db_models/booking.model");
 const Payment = require("../db_models/reservation-payment.model"), Attachment = require("../db_models/reservation-attachment.model"), Audit = require("../db_models/booking-log.model"), Report = require("../db_models/reports.model");
+const FinancialTransaction = require("../db_models/financial-transaction.model"), Withdrawal = require("../db_models/withdrawal.model");
 const { authorizePropertyRequest, permissionsForRole, FINANCE_REPORT_TYPES } = require("../services/property-permissions.service");
 const { billingReservation } = require("../services/finance-role.service");
 const { notificationTypesForRole } = require("../services/notification.service");
@@ -54,11 +55,39 @@ test("JWT Finance access grants/revokes per property; billing and report history
   t.mock.method(Report, "find", filter => query(reports.filter(record => matches(record, filter))));
   t.mock.method(Report, "countDocuments", filter => query(reports.filter(record => matches(record, filter)).length));
   t.mock.method(Report, "findOne", filter => query(reports.find(record => matches(record, filter)) || null));
+  const transactions = [owner, finance].map(actor => ({ property_id: propertyId, created_by: { user_id: String(actor._id), name: "Shared name" } }));
+  const withdrawals = [
+    { recipient_user_id: owner._id, recorded_by: { user_id: String(admin._id) }, amount: 1000 },
+    { recipient_user_id: admin._id, recorded_by: { user_id: String(owner._id) }, amount: 3000 }
+  ].map(row => ({ ...row, property_id: propertyId, status: "completed", currency: "LKR" }));
+  const transactionsFor = filter => {
+    const { "created_by.user_id": actorId, ...fields } = filter;
+    return transactions.filter(row => matches(row, fields) && (!actorId || row.created_by.user_id === actorId));
+  };
+  const asDocuments = rows => rows.map(row => ({ toObject: () => ({ ...row }) }));
+  t.mock.method(FinancialTransaction, "find", filter => query(asDocuments(transactionsFor(filter))));
+  t.mock.method(FinancialTransaction, "countDocuments", async filter => transactionsFor(filter).length);
+  t.mock.method(Withdrawal, "find", filter => query(asDocuments(withdrawals.filter(row => matches(row, filter)))));
+  t.mock.method(Withdrawal, "countDocuments", async filter => withdrawals.filter(row => matches(row, filter)).length);
+  t.mock.method(Withdrawal, "aggregate", async ([{ $match: filter }]) => {
+    assert.ok(filter.recipient_user_id instanceof mongoose.Types.ObjectId);
+    const rows = withdrawals.filter(row => matches(row, filter));
+    return [{ _id: "LKR", count: rows.length, amount: rows.reduce((sum, row) => sum + row.amount, 0) }];
+  });
   const { app } = require("../app"), server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
   const call = (actor, path, method = "GET", body) => fetch(`http://127.0.0.1:${server.address().port}/api${path}${method === "GET" ? `${path.includes("?") ? "&" : "?"}property_id=${propertyId}` : ""}`, { method, headers: { Authorization: `Bearer ${jwt.sign({ id: String(actor._id) }, process.env.JWT_SECRET)}`, "Content-Type": "application/json", "x-user-id": String(owner._id) }, ...(body ? { body: JSON.stringify({ property_id: propertyId, ...body }) } : {}) });
   assert.equal((await call(finance, "/reports/catalog")).status, 403);
   const granted = await call(admin, `/properties/${propertyId}/access`, "POST", { email: finance.email, role: "finance" }); assert.equal(granted.status, 201, await granted.clone().text());
   const access = await (await call(finance, `/properties/${propertyId}/my-access`)).json(); assert.equal(access.role, "finance");
+  const personalActivity = await call(finance, "/transactions?mine=true");
+  assert.equal(personalActivity.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual((await personalActivity.json()).transactions.map(row => row.created_by.user_id), [String(finance._id)]);
+  assert.equal((await (await call(finance, "/transactions")).json()).total, 2);
+  const personalWithdrawals = await call(owner, "/withdrawals?mine=true&status=completed");
+  assert.equal(personalWithdrawals.headers.get("cache-control"), "private, no-store");
+  const withdrawalSummary = await personalWithdrawals.json();
+  assert.deepEqual(withdrawalSummary.totals, [{ currency: "LKR", amount: 1000, count: 1 }]);
+  assert.deepEqual(withdrawalSummary.withdrawals.map(row => row.recipient_user_id), [String(owner._id)]);
   const metadata = await (await call(finance, `/properties/${propertyId}`)).json(); assert.ok(!JSON.stringify(metadata).includes("private-channel"));
   const billing = await (await call(finance, "/bookings/reservations?details=true")).json(); assert.equal(billing.reservations[0].booker.name, "Billing Guest"); assert.ok(!JSON.stringify(billing).includes("private-remark"));
   const detail = await call(finance, `/bookings/reservations/${reservation._id}`); assert.equal(detail.status, 200, await detail.clone().text()); assert.deepEqual((await detail.json()).attachments, []);

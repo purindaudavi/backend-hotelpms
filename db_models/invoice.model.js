@@ -99,6 +99,15 @@ const InvoiceSchema = new mongoose.Schema(
       maxlength: 50
     },
     reference_number: { type: String, trim: true, maxlength: 150, default: "" },
+    extension_of: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice" },
+    stay_override: {
+      type: new mongoose.Schema({
+        invoice_id: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", required: true },
+        invoice_no: { type: String, required: true },
+        reason: { type: String, required: true, trim: true, maxlength: 500 }
+      }, { _id: false }),
+      default: undefined
+    },
     reservation_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Reservation",
