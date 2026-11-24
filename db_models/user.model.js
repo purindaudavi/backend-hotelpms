@@ -37,6 +37,10 @@ const userSchema = new mongoose.Schema(
             required: true,
             maxlength: 15
         },
+        password_reset_otp_hash: { type: String, select: false },
+        password_reset_otp_expires_at: { type: Date, select: false },
+        password_reset_otp_attempts: { type: Number, default: 0, select: false },
+        password_reset_otp_requested_at: { type: Date, select: false },
         // Platform privileges and creation quotas are never accepted at signup.
         platform_owner: { type: Boolean, default: false },
         property_creation_limit: { type: Number, min: 0, max: 1000, default: 0, validate: Number.isInteger },
