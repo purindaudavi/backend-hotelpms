@@ -103,20 +103,36 @@ const PropertyInfoSchema = new mongoose.Schema(
       },
       default: ""
     },
-    check_in_time: {
+    check_in_time_from: {
       type: String,
-      required: [true, "Check-in time is required."],
+      required: [true, "Check-in From time is required."],
       trim: true,
-      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-in time must use HH:mm format."],
+      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-in From time must use HH:mm format."],
       default: "14:00"
     },
-    check_out_time: {
+    check_in_time_to: {
       type: String,
-      required: [true, "Check-out time is required."],
+      required: [true, "Check-in To time is required."],
       trim: true,
-      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-out time must use HH:mm format."],
+      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-in To time must use HH:mm format."],
+      default: "23:59"
+    },
+    check_out_time_from: {
+      type: String,
+      required: [true, "Check-out From time is required."],
+      trim: true,
+      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-out From time must use HH:mm format."],
       default: "11:00"
     },
+    check_out_time_to: {
+      type: String,
+      required: [true, "Check-out To time is required."],
+      trim: true,
+      match: [/^(?:[01]\d|2[0-3]):[0-5]\d$/, "Check-out To time must use HH:mm format."],
+      default: "12:00"
+    },
+    allow_early_check_in: { type: Boolean, default: false },
+    allow_late_check_out: { type: Boolean, default: false },
     home_currency: {
       type: String,
       required: [true, "Home currency is required."],
@@ -445,6 +461,30 @@ PropertyImageSchema.index(
   }
 );
 PropertyImageSchema.index({ property_id: 1, image_type: 1, is_primary: 1, sort_order: 1 });
+
+// Resolve old stored times before Mongoose applies defaults to the new ranges.
+// Both old single times become the From value of their corresponding range.
+PropertySchema.pre("init", function normalizeLegacyStayTimes(record) {
+  if (!record.info) return;
+  this.$locals.hasLegacyStayTimes = ["check_in_time", "check_out_time"].some(
+    field => Object.prototype.hasOwnProperty.call(record.info, field)
+  );
+  for (const prefix of ["check_in_time", "check_out_time"]) {
+    if (record.info[`${prefix}_from`] === undefined && record.info[prefix] !== undefined) {
+      record.info[`${prefix}_from`] = record.info[prefix];
+    }
+  }
+});
+
+
+PropertySchema.post("init", function persistLegacyStayTimesOnSave() {
+  if (!this.$locals.hasLegacyStayTimes) return;
+  for (const prefix of ["check_in_time", "check_out_time"]) {
+    this.markModified("info." + prefix + "_from");
+    this.markModified("info." + prefix + "_to");
+    this.set("info." + prefix, undefined, { strict: false });
+  }
+});
 
 PropertySchema.pre("validate", function normalizeProperty() {
   this.property_id = String(this.property_id || "").trim();

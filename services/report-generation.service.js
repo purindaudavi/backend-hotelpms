@@ -2,30 +2,41 @@ const Reservation = require("../db_models/booking.model");
 const ReservationPayment = require("../db_models/reservation-payment.model");
 const BusinessBlock = require("../db_models/business-block.model");
 const RoomType = require("../db_models/rooms.model");
+const Invoice = require("../db_models/invoice.model");
+const CreditNote = require("../db_models/credit-note.model");
+const Refund = require("../db_models/refund.model");
+const Purchase = require("../db_models/purchase.model");
+const Expense = require("../db_models/expense.model");
+const { reservationOverlapDateQuery } = require("./booking-inventory-dates.service");
+const { inventoryUsageForDay } = require("./booking-availability.service");
+
+const ISSUED_INVOICE_STATUSES = ["issued", "partially_paid", "paid", "credited"];
 
 const REPORT_CATALOG = [
-  available("collection-report", "Collection Report", "Collection"),
-  available("deposit-ledger", "Deposit Ledger", "Collection"),
-  unavailable("trial-balance", "Trial Balance", "Finance", ["general_ledger", "chart_of_accounts"]),
-  unavailable("profit-loss", "Profit & Loss", "Finance", ["general_ledger", "expenses", "purchases"]),
-  available("revenue-report", "Revenue Report", "Revenue"),
-  available("revenue-forecast", "Revenue Forecast - Room Revenue", "Revenue"),
-  unavailable("invoice-daybook", "Invoice Daybook", "Revenue", ["invoices", "folios"]),
-  available("customer-balance-summary", "Customer Balance Summary", "Receivable"),
-  available("ar-aging-summary", "AR Aging Summary", "Receivable"),
-  available("in-house-guest-ledger", "In-House Guest Ledger", "Receivable"),
-  available("information-sheet", "Information Sheet", "Reservation"),
-  available("reservation-list", "List of Reservations", "Reservation"),
-  available("business-analysis", "Business Analysis", "Business"),
-  available("arrival-list", "Arrival List", "Business"),
-  available("travel-agent-performance", "Travel Agent Performance", "Business"),
-  available("inventory-by-room-type", "Inventory By Room Type", "Occupancy"),
-  available("occupancy-by-date", "Occupancy by Date", "Occupancy")
+  available("collection-report", "Collection Report", "Collection", "Shows guest payments and completed refunds in the selected period, with the net amount collected."),
+  available("deposit-ledger", "Deposit Ledger", "Collection", "Groups guest payments and refunds by reservation and currency so you can see how much was collected for each booking."),
+  unavailable("trial-balance", "Trial Balance", "Finance", "Lists debit and credit balances by account to check that the books balance. This requires a general ledger and chart of accounts.", ["general_ledger", "chart_of_accounts"]),
+  available("profit-loss", "Profit & Loss", "Finance", "Shows how much the property made or lost after deducting credit notes, purchases and expenses from invoiced revenue."),
+  available("revenue-report", "Revenue Report", "Revenue", "Shows issued invoices and credit notes by document date, with revenue and tax listed separately."),
+  available("revenue-forecast", "Revenue Forecast - Room Revenue", "Revenue", "Estimates room revenue from active bookings arriving in the selected period, using their saved room charges."),
+  available("invoice-daybook", "Invoice Daybook", "Revenue", "Lists invoices by invoice date, including tax, credits, payments and the remaining balance."),
+  available("customer-balance-summary", "Customer Balance Summary", "Receivable", "Shows what guests still owe on invoices from the selected period, after payments and credits."),
+  available("ar-aging-summary", "AR Aging Summary", "Receivable", "Shows unpaid invoices and how many days overdue they are based on their due dates and the As Of date."),
+  available("in-house-guest-ledger", "In-House Guest Ledger", "Receivable", "Shows guests currently checked in and the balances on their issued invoices."),
+  available("information-sheet", "Information Sheet", "Reservation", "Lists reservation details for staff, including guest contact information, assigned rooms, meal plans and guest remarks."),
+  available("reservation-list", "List of Reservations", "Reservation", "Lists reservations made in the selected period, with stay dates, booking sources, statuses and totals."),
+  available("business-analysis", "Business Analysis", "Business", "Shows group room blocks, how many rooms were booked or released, and how many remain held."),
+  available("arrival-list", "Arrival List", "Business", "Shows guests due to arrive in the selected dates, with room assignments and reservation status."),
+  available("travel-agent-performance", "Travel Agent Performance", "Business", "Shows reservations, room nights, revenue and commission by travel agent."),
+  available("inventory-by-room-type", "Inventory By Room Type", "Occupancy", "Shows current room counts by type, including rooms available, occupied, out of service or being cleaned."),
+  available("occupancy-by-date", "Occupancy by Date", "Occupancy", "Shows daily occupancy and how many rooms are available after reservations, room blocks and group holds.")
 ];
 
 const builders = {
   "collection-report": collectionReport,
   "deposit-ledger": depositLedger,
+  "profit-loss": profitAndLoss,
+  "invoice-daybook": invoiceDaybook,
   "revenue-report": revenueReport,
   "revenue-forecast": revenueForecast,
   "customer-balance-summary": customerBalanceSummary,
@@ -94,56 +105,108 @@ function normalizeReportParameters(input = {}) {
 }
 
 async function collectionReport(propertyId, parameters) {
-  const payments = await paymentRecords(propertyId, parameters);
-  const reservations = await reservationsByIds(payments.map((payment) => payment.reservation_id));
-  const rows = payments.map((payment) => {
-    const reservation = reservations.get(String(payment.reservation_id));
+  const movements = await collectionMovements(propertyId, parameters);
+  const reservations = await reservationsByIds(propertyId, movements.map((entry) => entry.reservation_id));
+  const rows = movements.map(({ reservation_id, reservation_no, ...entry }) => {
+    const reservation = reservations.get(String(reservation_id));
     return {
-      payment_id: String(payment._id),
-      posted_at: isoDateTime(payment.posted_at),
-      reservation_no: reservation?.reservation_no || "",
+      ...entry,
+      reservation_no: reservation_no || reservation?.reservation_no || "",
+      guest_name: reservation?.booker?.name || ""
+    };
+  });
+  return tabular(
+    rows,
+    columnsFromKeys(rows, ["posted_at", "type", "document_no", "reservation_no", "guest_name",
+      "payment_method", "payment_reference", "status", "currency", "amount", "cashier"]),
+    { transaction_count: rows.length },
+    collectionTotals(rows),
+    ["Payments are shown on their posting dates. Completed refunds reduce net collections on their completion dates."]
+  );
+}
+
+async function depositLedger(propertyId, parameters) {
+  const movements = await collectionMovements(propertyId, parameters);
+  const reservations = await reservationsByIds(propertyId, movements.map((entry) => entry.reservation_id));
+  const grouped = new Map();
+  for (const movement of movements) {
+    const reservation = reservations.get(String(movement.reservation_id));
+    const key = `${movement.reservation_id}:${movement.currency}`;
+    const entry = grouped.get(key) || {
+      reservation_no: movement.reservation_no || reservation?.reservation_no || "",
       guest_name: reservation?.booker?.name || "",
+      check_in: isoDate(reservation?.check_in),
+      check_out: isoDate(reservation?.check_out),
+      currency: movement.currency,
+      payments_received: 0,
+      refunds: 0,
+      deposit_amount: 0,
+      payment_count: 0,
+      refund_count: 0
+    };
+    if (movement.type === "Refund") {
+      entry.refunds = round(entry.refunds - movement.amount);
+      entry.refund_count += 1;
+    } else {
+      entry.payments_received = round(entry.payments_received + movement.amount);
+      entry.payment_count += 1;
+    }
+    entry.deposit_amount = round(entry.payments_received - entry.refunds);
+    grouped.set(key, entry);
+  }
+  const rows = Array.from(grouped.values());
+  return tabular(rows, columnsFromKeys(rows, [
+    "reservation_no", "guest_name", "check_in", "check_out", "currency", "payments_received",
+    "refunds", "deposit_amount", "payment_count", "refund_count"
+  ]), { reservation_count: new Set(movements.map((entry) => String(entry.reservation_id))).size }, {
+    received_by_currency: groupMoney(rows, "payments_received"),
+    refunded_by_currency: groupMoney(rows, "refunds"),
+    amount_by_currency: groupMoney(rows, "deposit_amount")
+  }, ["Shows net guest collections grouped by reservation and currency for the selected period."]);
+}
+
+async function collectionMovements(propertyId, parameters) {
+  const [payments, refunds] = await Promise.all([
+    financialRecords(ReservationPayment, propertyId, parameters, "posted_at", { status: { $in: ["posted", "refunded"] } }),
+    financialRecords(Refund, propertyId, parameters, "completed_at", { status: "completed" })
+  ]);
+  return [
+    ...payments.map((payment) => ({
+      payment_id: String(payment._id),
+      reservation_id: payment.reservation_id,
+      type: payment.status === "refunded" ? "Refund" : "Payment",
+      document_no: payment.invoice_no || "",
+      posted_at: isoDateTime(payment.posted_at),
       payment_method: payment.payment_method,
       payment_reference: payment.payment_reference,
       status: payment.status,
       currency: payment.currency,
       amount: signedPaymentAmount(payment),
       cashier: payment.posted_by?.name || "System"
-    };
-  });
-  return tabular(
-    rows,
-    paymentColumns(),
-    { transaction_count: rows.length },
-    moneyTotals(rows, "amount")
-  );
+    })),
+    ...refunds.map((refund) => ({
+      payment_id: String(refund._id),
+      reservation_id: refund.reservation_id,
+      reservation_no: refund.reservation_no,
+      type: "Refund",
+      document_no: refund.refund_no,
+      posted_at: isoDateTime(refund.completed_at),
+      payment_method: refund.refund_method,
+      payment_reference: refund.reference_number,
+      status: refund.status,
+      currency: refund.currency,
+      amount: -number(refund.amount),
+      cashier: refund.completed_by?.name || "System"
+    }))
+  ].sort((left, right) => left.posted_at.localeCompare(right.posted_at));
 }
 
-async function depositLedger(propertyId, parameters) {
-  const payments = await paymentRecords(propertyId, parameters);
-  const reservations = await reservationsByIds(payments.map((payment) => payment.reservation_id));
-  const grouped = new Map();
-  for (const payment of payments) {
-    const key = String(payment.reservation_id);
-    const reservation = reservations.get(key);
-    const entry = grouped.get(key) || {
-      reservation_id: key,
-      reservation_no: reservation?.reservation_no || "",
-      guest_name: reservation?.booker?.name || "",
-      check_in: isoDate(reservation?.check_in),
-      check_out: isoDate(reservation?.check_out),
-      currency: payment.currency,
-      deposit_amount: 0,
-      payment_count: 0
-    };
-    entry.deposit_amount += signedPaymentAmount(payment);
-    entry.payment_count += 1;
-    grouped.set(key, entry);
-  }
-  const rows = Array.from(grouped.values());
-  return tabular(rows, columnsFromKeys(rows, [
-    "reservation_no", "guest_name", "check_in", "check_out", "currency", "deposit_amount", "payment_count"
-  ]), { reservation_count: rows.length }, moneyTotals(rows, "deposit_amount"));
+function collectionTotals(rows) {
+  return {
+    received_by_currency: groupMoney(rows.filter((row) => row.type === "Payment"), "amount"),
+    refunded_by_currency: groupMoney(rows.filter((row) => row.type === "Refund").map((row) => ({ ...row, amount: -row.amount })), "amount"),
+    amount_by_currency: groupMoney(rows, "amount")
+  };
 }
 
 async function reservationList(propertyId, parameters) {
@@ -193,81 +256,182 @@ async function arrivalList(propertyId, parameters) {
 }
 
 async function revenueReport(propertyId, parameters) {
-  const reservations = await reservationRecords(propertyId, parameters, "check_in", {
-    status: { $in: ["confirmed", "checked_in", "checked_out"] }
-  });
-  const rows = reservations.map(reservationRow);
-  return tabular(
-    rows,
-    columnsFromKeys(rows, ["reservation_no", "check_in", "check_out", "guest_name", "status", "currency", "grand_total", "paid_total", "balance"]),
-    reservationSummary(rows),
-    reservationMoneyTotals(rows),
-    ["Revenue is grouped by reservation check-in date and uses the saved reservation financial summary."]
-  );
+  const [invoices, credits] = await billingDocuments(propertyId, parameters);
+  const rows = [
+    ...invoices.map((invoice) => revenueRow({
+      document: invoice, type: "Invoice", date: invoice.invoice_date, no: invoice.invoice_no, total: invoice.grand_total
+    })),
+    ...credits.map((credit) => revenueRow({
+      document: credit, type: "Credit note", date: credit.credit_date, no: credit.credit_note_no, total: -number(credit.total_credit)
+    }))
+  ].sort((left, right) => left.document_date.localeCompare(right.document_date));
+  return tabular(rows, columnsFromKeys(rows, [
+    "document_date", "document_type", "document_no", "reservation_no", "guest_name", "currency", "net_revenue", "tax", "gross_amount"
+  ]), { invoice_count: invoices.length, credit_note_count: credits.length }, {
+    net_revenue_by_currency: groupMoney(rows, "net_revenue"),
+    tax_by_currency: groupMoney(rows, "tax"),
+    gross_amount_by_currency: groupMoney(rows, "gross_amount")
+  }, ["Shows invoiced revenue and issued credits by document date. Guest receipts are shown in the Collection Report."]);
+}
+
+function revenueRow({ document, type, date, no, total }) {
+  const tax = (type === "Credit note" ? -1 : 1) * number(document.tax_total);
+  return {
+    document_date: isoDate(date), document_type: type, document_no: no,
+    reservation_no: document.reservation_no,
+    guest_name: document.billing_snapshot?.name || document.guest_snapshot?.name || "",
+    currency: document.currency,
+    net_revenue: round(number(total) - tax), tax, gross_amount: number(total)
+  };
 }
 
 async function revenueForecast(propertyId, parameters) {
   const query = {
     status: { $in: ["tentative", "confirmed", "checked_in"] },
-    check_out: { $gt: parameters.as_of }
+    $or: [
+      { check_out: { $gt: parameters.as_of } },
+      { is_day_room: true, check_in: { $gte: parameters.as_of, $lt: nextDay(parameters.date_to) } }
+    ]
   };
   const reservations = await reservationRecords(propertyId, parameters, "check_in", query);
-  const rows = reservations.map(reservationRow);
+  const rows = reservations.map((reservation) => ({
+    ...reservationRow(reservation),
+    room_revenue: number(reservation.financial_summary?.room_total)
+  }));
   return tabular(
     rows,
-    columnsFromKeys(rows, ["reservation_no", "check_in", "check_out", "room_count", "status", "currency", "grand_total", "paid_total", "balance"]),
+    columnsFromKeys(rows, ["reservation_no", "check_in", "check_out", "room_count", "status", "currency", "room_revenue"]),
     reservationSummary(rows),
-    reservationMoneyTotals(rows),
-    ["Forecast includes active reservations and excludes cancelled and no-show reservations."]
+    { room_revenue_by_currency: groupMoney(rows, "room_revenue") },
+    ["Forecast uses the saved room subtotal of active reservations in the selected arrival range."]
   );
 }
 
-async function customerBalanceSummary(propertyId, parameters) {
-  const reservations = await reservationRecords(propertyId, parameters, "check_out", {
-    status: { $nin: ["cancelled", "no_show"] },
-    "financial_summary.grand_total": { $gt: 0 }
-  });
-  const rows = reservations.map(reservationRow).filter((row) => row.balance > 0);
+async function invoiceDaybook(propertyId, parameters) {
+  const invoices = await issuedInvoices(propertyId, parameters);
+  const rows = invoices.map((invoice) => ({
+    ...invoiceBalanceRow(invoice),
+    status: invoice.status,
+    subtotal: number(invoice.subtotal),
+    discount: number(invoice.discount_total),
+    tax: number(invoice.tax_total)
+  }));
   return tabular(rows, columnsFromKeys(rows, [
-    "reservation_no", "guest_name", "check_out", "status", "currency", "grand_total", "paid_total", "balance"
-  ]), { customer_count: new Set(rows.map((row) => row.guest_name)).size, reservation_count: rows.length }, moneyTotals(rows, "balance"));
+    "invoice_no", "invoice_date", "due_date", "reservation_no", "guest_name", "status", "currency",
+    "subtotal", "discount", "tax", "grand_total", "credited_amount", "paid_total", "balance"
+  ]), { invoice_count: rows.length }, invoiceTotals(rows), [
+    "Includes issued invoices by invoice date with their current credits, payments and balances."
+  ]);
+}
+
+async function profitAndLoss(propertyId, parameters) {
+  const [[invoices, credits], purchases, expenses] = await Promise.all([
+    billingDocuments(propertyId, parameters),
+    financialRecords(Purchase, propertyId, parameters, "purchase_date", { status: { $in: ["to_be_paid", "paid"] } }),
+    financialRecords(Expense, propertyId, parameters, "expense_date", { status: "posted" })
+  ]);
+  const buckets = new Map();
+  function add(records, field, amount) {
+    for (const record of records) {
+      const row = buckets.get(record.currency) || {
+        currency: record.currency, invoice_revenue: 0, credit_notes: 0, purchases: 0, expenses: 0
+      };
+      row[field] = round(row[field] + amount(record));
+      buckets.set(record.currency, row);
+    }
+  }
+  add(invoices, "invoice_revenue", (item) => number(item.grand_total) - number(item.tax_total));
+  add(credits, "credit_notes", (item) => number(item.total_credit) - number(item.tax_total));
+  add(purchases, "purchases", (item) => number(item.amount));
+  add(expenses, "expenses", (item) => number(item.amount));
+  const rows = Array.from(buckets.values(), (row) => ({
+    ...row,
+    net_revenue: round(row.invoice_revenue - row.credit_notes),
+    total_costs: round(row.purchases + row.expenses),
+    profit: round(row.invoice_revenue - row.credit_notes - row.purchases - row.expenses)
+  })).sort((left, right) => left.currency.localeCompare(right.currency));
+  return tabular(rows, columnsFromKeys(rows, [
+    "currency", "invoice_revenue", "credit_notes", "net_revenue", "purchases", "expenses", "total_costs", "profit"
+  ]), {}, { profit_by_currency: groupMoney(rows, "profit") }, [
+    "Operational Profit & Loss uses issued invoices and credit notes excluding their tax, plus recorded purchases and expenses. Currencies are shown separately.",
+    "Guest payments, refunds, supplier payments and cash advances do not add a second revenue or cost. Recorded staff expenses are included."
+  ]);
+}
+
+async function customerBalanceSummary(propertyId, parameters) {
+  const invoices = await issuedInvoices(propertyId, parameters);
+  const rows = invoices.map(invoiceBalanceRow).filter((row) => row.balance > 0);
+  return tabular(rows, columnsFromKeys(rows, [
+    "invoice_no", "invoice_date", "due_date", "reservation_no", "guest_name", "currency",
+    "grand_total", "credited_amount", "paid_total", "balance"
+  ]), { unpaid_invoice_count: rows.length }, moneyTotals(rows, "balance"), [
+    "Shows current outstanding invoice balances for the selected invoice date range."
+  ]);
 }
 
 async function arAgingSummary(propertyId, parameters) {
-  const reservations = await Reservation.find({
+  const invoices = await Invoice.find({
     property_id: propertyId,
-    deleted_at: { $exists: false },
-    status: { $nin: ["cancelled", "no_show"] },
-    "financial_summary.grand_total": { $gt: 0 },
+    status: { $in: ISSUED_INVOICE_STATUSES },
+    invoice_date: { $lt: nextDay(parameters.as_of) },
     ...(parameters.currency ? { currency: parameters.currency } : {})
-  }).sort({ check_out: 1 }).lean();
-  const rows = reservations.map((reservation) => {
-    const amount = balance(reservation);
-    const age = Math.max(0, daysBetween(new Date(reservation.check_out), parameters.as_of));
+  }).sort({ due_date: 1, _id: 1 }).lean();
+  const rows = invoices.map((invoice) => {
+    const row = invoiceBalanceRow(invoice);
+    const dueDate = dateOnly(row.due_date || row.invoice_date, "due_date");
+    const age = Math.max(0, daysBetween(dueDate, parameters.as_of));
     return {
-      reservation_no: reservation.reservation_no,
-      guest_name: reservation.booker.name,
-      due_date: isoDate(reservation.check_out),
+      ...row,
       days_outstanding: age,
-      aging_bucket: age === 0 ? "Current" : age <= 30 ? "1-30" : age <= 60 ? "31-60" : age <= 90 ? "61-90" : "90+",
-      currency: reservation.currency,
-      balance: amount
+      aging_bucket: age === 0 ? "Current" : age <= 30 ? "1-30" : age <= 60 ? "31-60" : age <= 90 ? "61-90" : "91+"
     };
   }).filter((row) => row.balance > 0);
-  return tabular(rows, columnsFromRows(rows), { account_count: rows.length, as_of: isoDate(parameters.as_of) }, moneyTotals(rows, "balance"));
+  return tabular(rows, columnsFromKeys(rows, [
+    "invoice_no", "reservation_no", "guest_name", "due_date", "days_outstanding", "aging_bucket", "currency", "balance"
+  ]), { unpaid_invoice_count: rows.length, as_of: isoDate(parameters.as_of) }, moneyTotals(rows, "balance"), [
+    "As Of sets the invoice cutoff and measures age from the invoice due date. Balances reflect the latest posted payments and credits."
+  ]);
 }
 
 async function inHouseGuestLedger(propertyId, parameters) {
   const reservations = await Reservation.find({
     property_id: propertyId,
     deleted_at: { $exists: false },
-    status: "checked_in",
-    ...(parameters.currency ? { currency: parameters.currency } : {})
+    status: "checked_in"
   }).sort({ check_in: 1 }).lean();
-  const rows = reservations.map(reservationRow);
+  const invoices = await Invoice.find({
+    property_id: propertyId,
+    reservation_id: { $in: reservations.map((reservation) => reservation._id) },
+    status: { $in: ISSUED_INVOICE_STATUSES }
+  }).sort({ invoice_date: 1, _id: 1 }).lean();
+  const byReservation = new Map();
+  for (const invoice of invoices) {
+    const key = String(invoice.reservation_id);
+    if (!byReservation.has(key)) byReservation.set(key, []);
+    byReservation.get(key).push(invoice);
+  }
+  const rows = reservations.flatMap((reservation) => {
+    const stay = reservationRow(reservation);
+    const issued = byReservation.get(String(reservation._id)) || [];
+    const candidates = issued.length ? issued.map(invoiceBalanceRow) : [{
+      invoice_no: "", currency: stay.currency, grand_total: 0, credited_amount: 0, paid_total: 0, balance: 0
+    }];
+    return candidates.filter((invoice) => !parameters.currency || invoice.currency === parameters.currency)
+      .map((invoice) => ({
+        reservation_no: stay.reservation_no, guest_name: stay.guest_name,
+        check_in: stay.check_in, check_out: stay.check_out, ...invoice
+      }));
+  });
+  const shown = new Set(rows.map((row) => row.reservation_no));
   return tabular(rows, columnsFromKeys(rows, [
-    "reservation_no", "guest_name", "check_in", "check_out", "room_count", "currency", "grand_total", "paid_total", "balance"
-  ]), { in_house_reservations: rows.length, in_house_rooms: sum(rows, "room_count") }, reservationMoneyTotals(rows));
+    "reservation_no", "guest_name", "check_in", "check_out", "invoice_no", "currency",
+    "grand_total", "credited_amount", "paid_total", "balance"
+  ]), {
+    in_house_reservations: shown.size,
+    in_house_rooms: reservations.filter((item) => shown.has(item.reservation_no)).reduce((total, item) => total + item.rooms.length, 0)
+  }, invoiceTotals(rows), [
+    "Shows guests currently checked in, with balances from issued invoices. A blank invoice number means the stay has no issued invoice."
+  ]);
 }
 
 async function travelAgentPerformance(propertyId, parameters) {
@@ -277,7 +441,8 @@ async function travelAgentPerformance(propertyId, parameters) {
   });
   const agents = new Map();
   for (const reservation of reservations) {
-    const key = reservation.travel_agent.travel_agent_id || reservation.travel_agent.name.toLowerCase();
+    const agentId = reservation.travel_agent.travel_agent_id || reservation.travel_agent.name.toLowerCase();
+    const key = `${agentId}:${reservation.currency}`;
     const entry = agents.get(key) || {
       travel_agent_id: reservation.travel_agent.travel_agent_id || "",
       travel_agent: reservation.travel_agent.name,
@@ -294,7 +459,10 @@ async function travelAgentPerformance(propertyId, parameters) {
     agents.set(key, entry);
   }
   const rows = Array.from(agents.values()).sort((a, b) => b.revenue - a.revenue);
-  return tabular(rows, columnsFromRows(rows), { travel_agent_count: rows.length, reservation_count: sum(rows, "reservations") }, {
+  return tabular(rows, columnsFromRows(rows), {
+    travel_agent_count: new Set(rows.map((row) => row.travel_agent_id || row.travel_agent.toLowerCase())).size,
+    reservation_count: sum(rows, "reservations")
+  }, {
     revenue_by_currency: groupMoney(rows, "revenue"),
     commission_by_currency: groupMoney(rows, "commission"),
     total_room_nights: sum(rows, "room_nights")
@@ -361,55 +529,117 @@ async function inventoryByRoomType(propertyId) {
 }
 
 async function occupancyByDate(propertyId, parameters) {
-  const roomTypes = await RoomType.find({ property_id: propertyId, active: true }).lean();
-  const activeRooms = roomTypes.flatMap((type) => type.physical_rooms.filter((room) => room.active));
-  const totalRooms = activeRooms.length;
-  const reservations = await Reservation.find({
-    property_id: propertyId,
-    deleted_at: { $exists: false },
-    status: { $in: ["tentative", "confirmed", "checked_in", "checked_out"] },
-    check_in: { $lt: nextDay(parameters.date_to) },
-    check_out: { $gt: parameters.date_from },
-    ...(parameters.currency ? { currency: parameters.currency } : {})
-  }).lean();
+  const endDate = nextDay(parameters.date_to);
+  const projection = { rooms: 1, check_in: 1, check_out: 1, is_day_room: 1, status: 1 };
+  const [roomTypes, reservations, blocks] = await Promise.all([
+    RoomType.find({ property_id: propertyId, active: true }, { physical_rooms: 1 }).lean(),
+    Reservation.find({
+      property_id: propertyId,
+      deleted_at: { $exists: false },
+      status: { $in: [...Reservation.ACTIVE_RESERVATION_STATUSES, "checked_out"] },
+      ...reservationOverlapDateQuery(parameters.date_from, endDate)
+    }, projection).lean(),
+    BusinessBlock.find({
+      property_id: propertyId,
+      deleted_at: { $exists: false },
+      status: "active",
+      check_in: { $lt: endDate },
+      check_out: { $gt: parameters.date_from }
+    }, { allocations: 1, check_in: 1, check_out: 1 }).lean()
+  ]);
+  const capacities = roomTypes.map((type) => ({
+    id: String(type._id),
+    sellable: type.physical_rooms.filter((room) =>
+      room.active && !["maintenance", "out_of_order"].includes(room.operational_status)
+    ).length
+  }));
+  const totalRooms = sum(capacities, "sellable");
+  const blockedReservations = reservations.filter((item) => item.status === "blocked");
   const rows = eachDay(parameters.date_from, parameters.date_to).map((date) => {
-    const end = nextDay(date);
-    const occupiedKeys = new Set();
-    let unassigned = 0;
-    for (const reservation of reservations) {
-      if (!(new Date(reservation.check_in) < end && new Date(reservation.check_out) > date)) continue;
-      for (const room of reservation.rooms) {
-        if (room.physical_room_id) occupiedKeys.add(String(room.physical_room_id));
-        else unassigned += 1;
-      }
+    const { usedByType, heldByType } = inventoryUsageForDay(date.getTime(), reservations, blocks);
+    const { usedByType: blockedByType } = inventoryUsageForDay(date.getTime(), blockedReservations, []);
+    let occupied = 0;
+    let blocked = 0;
+    let held = 0;
+    let available = 0;
+    for (const { id, sellable } of capacities) {
+      const used = usedByType.get(id) ?? 0;
+      const blockedCount = blockedByType.get(id) ?? 0;
+      const heldCount = heldByType.get(id) ?? 0;
+      occupied += Math.min(sellable, used - blockedCount);
+      blocked += blockedCount;
+      held += heldCount;
+      available += Math.max(0, sellable - used - heldCount);
     }
-    const occupiedRooms = Math.min(totalRooms, occupiedKeys.size + unassigned);
     return {
       date: isoDate(date),
       total_rooms: totalRooms,
-      occupied_rooms: occupiedRooms,
-      available_rooms: Math.max(0, totalRooms - occupiedRooms),
-      occupancy_percentage: totalRooms ? round((occupiedRooms / totalRooms) * 100) : 0
+      occupied_rooms: occupied,
+      blocked_rooms: blocked,
+      business_block_holds: held,
+      available_rooms: available,
+      occupancy_percentage: totalRooms ? round((occupied / totalRooms) * 100) : 0
     };
   });
   return tabular(rows, columnsFromRows(rows), { days: rows.length, total_rooms: totalRooms }, {
     average_occupancy_percentage: rows.length ? round(sum(rows, "occupancy_percentage") / rows.length) : 0
-  }, ["Available rooms are counted before business-block holds."]);
+  }, [
+    "Uses current sellable room capacity and all booking currencies. Reservations, blocked rooms and remaining business-block holds use inventory on their applicable dates.",
+    "Occupancy includes reserved stays and day-use stays. Past dates use current room configuration because room capacity snapshots are not stored."
+  ]);
 }
 
-async function paymentRecords(propertyId, parameters) {
-  return ReservationPayment.find({
+function financialRecords(model, propertyId, parameters, dateField, extra) {
+  return model.find({
     property_id: propertyId,
-    posted_at: dateRange(parameters),
-    status: { $in: ["posted", "refunded"] },
+    [dateField]: dateRange(parameters),
+    ...extra,
     ...(parameters.currency ? { currency: parameters.currency } : {})
-  }).sort({ posted_at: 1, _id: 1 }).lean();
+  }).sort({ [dateField]: 1, _id: 1 }).lean();
 }
 
-async function reservationsByIds(ids) {
+function issuedInvoices(propertyId, parameters) {
+  return financialRecords(Invoice, propertyId, parameters, "invoice_date", {
+    status: { $in: ISSUED_INVOICE_STATUSES }
+  });
+}
+
+function billingDocuments(propertyId, parameters) {
+  return Promise.all([
+    issuedInvoices(propertyId, parameters),
+    financialRecords(CreditNote, propertyId, parameters, "credit_date", { status: "issued" })
+  ]);
+}
+
+function invoiceBalanceRow(invoice) {
+  const grandTotal = number(invoice.grand_total);
+  const credited = number(invoice.credited_amount);
+  const paid = number(invoice.paid_amount);
+  return {
+    invoice_no: invoice.invoice_no,
+    invoice_date: isoDate(invoice.invoice_date),
+    due_date: isoDate(invoice.due_date),
+    reservation_no: invoice.reservation_no,
+    guest_name: invoice.billing_snapshot?.name || "",
+    currency: invoice.currency,
+    grand_total: grandTotal,
+    credited_amount: credited,
+    paid_total: paid,
+    balance: round(Math.max(0, grandTotal - credited - paid))
+  };
+}
+
+function invoiceTotals(rows) {
+  return {
+    ...reservationMoneyTotals(rows),
+    credited_by_currency: groupMoney(rows, "credited_amount")
+  };
+}
+
+async function reservationsByIds(propertyId, ids) {
   const uniqueIds = Array.from(new Set(ids.map(String)));
   if (!uniqueIds.length) return new Map();
-  const reservations = await Reservation.find({ _id: { $in: uniqueIds } }, {
+  const reservations = await Reservation.find({ property_id: propertyId, _id: { $in: uniqueIds } }, {
     reservation_no: 1, booker: 1, check_in: 1, check_out: 1
   }).lean();
   return new Map(reservations.map((reservation) => [String(reservation._id), reservation]));
@@ -456,10 +686,6 @@ function columnsFromRows(rows) {
 
 function columnsFromKeys(_rows, keys) {
   return keys.map((key) => ({ key, label: normalizeColumnLabel(key) }));
-}
-
-function paymentColumns() {
-  return columnsFromKeys([], ["posted_at", "reservation_no", "guest_name", "payment_method", "payment_reference", "status", "currency", "amount", "cashier"]);
 }
 
 function tabular(rows, columns, summary = {}, totals = {}, limitations = []) {
@@ -584,12 +810,12 @@ function csvValue(value) {
   return `"${text.replaceAll('"', '""')}"`;
 }
 
-function available(reportType, title, group) {
-  return { report_type: reportType, title, group, available: true, required_modules: [] };
+function available(reportType, title, group, description) {
+  return { report_type: reportType, title, group, description, available: true, required_modules: [] };
 }
 
-function unavailable(reportType, title, group, requiredModules) {
-  return { report_type: reportType, title, group, available: false, required_modules: requiredModules };
+function unavailable(reportType, title, group, description, requiredModules) {
+  return { report_type: reportType, title, group, description, available: false, required_modules: requiredModules };
 }
 
 function httpError(statusCode, message, code = "REPORT_REQUEST_INVALID") {

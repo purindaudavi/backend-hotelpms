@@ -318,6 +318,7 @@ const ReservationSchema = new mongoose.Schema(
       required: false,
       default: undefined
     },
+    website_booking_fingerprint: { type: String, select: false },
     tour_number: { type: String, trim: true, maxlength: 120, default: "" },
     group_name: { type: String, trim: true, maxlength: 150, default: "" },
     travel_agent: { type: TravelAgentSchema, default: () => ({}) },

@@ -26,3 +26,16 @@ test("v2 allocation distributes remainder cents exactly once and separates payme
   const groups = receiptSummary([{ currency: "LKR", payment_method: "cash", amount: 100 }, { currency: "LKR", payment_method: "cash", amount: 50 }, { currency: "USD", payment_method: "cash", amount: 5 }, { currency: "LKR", payment_method: "credit_card", amount: 50 }]);
   assert.equal(groups.length, 3); assert.equal(groups.find(g => g.key === "LKR:cash").expected, 150);
 });
+test("dated website invoice lines use the actual charge on each service day", () => {
+  const reservation = { _id: "r", reservation_no: "RES-WEB-1" };
+  const invoice = {
+    _id: "invoice", invoice_no: "INV-WEB-1", currency: "LKR", status: "issued",
+    stay_snapshot: { check_in: "2026-11-10", check_out: "2026-11-12" },
+    line_items: [6500, 7200].map((net_amount, index) => ({
+      _id: index, source_type: "accommodation", net_amount,
+      service_date: `2026-11-${10 + index}`, exact_service_date: true
+    }))
+  };
+  assert.deepEqual(dailyCharges(reservation, [invoice], "2026-11-10").map((line) => line.total), [6500]);
+  assert.deepEqual(dailyCharges(reservation, [invoice], "2026-11-11").map((line) => line.total), [7200]);
+});

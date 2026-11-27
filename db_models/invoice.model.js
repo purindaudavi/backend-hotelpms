@@ -57,6 +57,7 @@ const InvoiceLineSchema = new mongoose.Schema(
     },
     source_id: { type: String, trim: true, maxlength: 150, default: "" },
     service_date: { type: Date, required: true },
+    exact_service_date: { type: Boolean },
     description: { type: String, required: true, trim: true, maxlength: 500 },
     room_number: { type: String, trim: true, maxlength: 30, default: "" },
     quantity: { type: Number, required: true, min: 0.01, default: 1 },

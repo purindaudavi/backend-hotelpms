@@ -18,8 +18,8 @@ function validProperty(overrides = {}) {
       phone: "+94 70 355 1340",
       email: " HOTEL@EXAMPLE.COM ",
       website: "https://example.com",
-      check_in_time: "14:00",
-      check_out_time: "11:00",
+      check_in_time_from: "14:00",
+      check_out_time_from: "11:00",
       home_currency: "lkr",
       language_code: "en",
       timezone: "Asia/Colombo",
@@ -51,7 +51,10 @@ test("rejects invalid country, currency, email, website and times", async () => 
     home_currency: "rupees",
     email: "invalid-email",
     website: "ftp://example.com",
-    check_in_time: "25:00"
+    check_in_time_from: "25:00",
+    check_in_time_to: "12:60",
+    check_out_time_from: "5:00",
+    check_out_time_to: "08:00 AM"
   });
 
   await assert.rejects(property.validate(), (error) => {
@@ -59,9 +62,113 @@ test("rejects invalid country, currency, email, website and times", async () => 
     assert.ok(error.errors["info.home_currency"]);
     assert.ok(error.errors["info.email"]);
     assert.ok(error.errors["info.website"]);
-    assert.ok(error.errors["info.check_in_time"]);
+    assert.ok(error.errors["info.check_in_time_from"]);
+    assert.ok(error.errors["info.check_in_time_to"]);
+    assert.ok(error.errors["info.check_out_time_from"]);
+    assert.ok(error.errors["info.check_out_time_to"]);
     return true;
   });
+});
+
+
+test("stay time ranges provide defaults and allow crossing midnight", async () => {
+  const property = validProperty();
+  assert.equal(property.info.check_in_time_from, "14:00");
+  assert.equal(property.info.check_in_time_to, "23:59");
+  assert.equal(property.info.check_out_time_from, "11:00");
+  assert.equal(property.info.check_out_time_to, "12:00");
+  property.info.check_in_time_from = "18:00";
+  property.info.check_in_time_to = "12:00";
+  property.info.check_out_time_from = "05:00";
+  property.info.check_out_time_to = "08:00";
+  await property.validate();
+  property.info.check_out_time_from = "23:00";
+  property.info.check_out_time_to = "01:00";
+  await property.validate();
+});
+
+test("stored single times populate From fields without replacing saved ranges", async () => {
+  const raw = validProperty().toObject();
+  delete raw.info.check_in_time_from;
+  delete raw.info.check_out_time_from;
+  delete raw.info.check_in_time_to;
+  delete raw.info.check_out_time_to;
+  raw.info.check_in_time = "16:30";
+  raw.info.check_out_time = "10:15";
+  const property = Property.hydrate({ ...raw, info: { ...raw.info } });
+  assert.equal(property.info.check_in_time_from, "16:30");
+  assert.equal(property.info.check_out_time_from, "10:15");
+  assert.equal(property.info.check_in_time_to, "23:59");
+  assert.equal(property.info.check_out_time_to, "12:00");
+  await property.validate();
+
+  raw.info.check_in_time_from = "18:00";
+  raw.info.check_out_time_from = "05:00";
+  const ranged = Property.hydrate(raw);
+  assert.equal(ranged.info.check_in_time_from, "18:00");
+  assert.equal(ranged.info.check_out_time_from, "05:00");
+});
+
+
+test("saving a legacy property persists all four range fields and removes old single times", async t => {
+  const raw = validProperty().toObject();
+  raw.version = 7;
+  for (const field of ["check_in_time_from", "check_in_time_to", "check_out_time_from", "check_out_time_to"]) {
+    delete raw.info[field];
+  }
+  raw.info.check_in_time = "16:30";
+  raw.info.check_out_time = "10:15";
+  const property = Property.hydrate(raw);
+  let savedUpdate;
+  t.mock.method(Property.collection, "updateOne", async (filter, update) => {
+    assert.equal(String(filter._id), String(property._id));
+    assert.equal(filter.version, 7, "migration retains optimistic concurrency checks");
+    savedUpdate = update;
+    return { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+  });
+
+  // Save without changing the time inputs, as with Settings -> Edit -> Save.
+  await property.save();
+  assert.equal(savedUpdate.$set["info.check_in_time_from"], "16:30");
+  assert.equal(savedUpdate.$set["info.check_in_time_to"], "23:59");
+  assert.equal(savedUpdate.$set["info.check_out_time_from"], "10:15");
+  assert.equal(savedUpdate.$set["info.check_out_time_to"], "12:00");
+  assert.equal(savedUpdate.$unset["info.check_in_time"], 1);
+  assert.equal(savedUpdate.$unset["info.check_out_time"], 1);
+  assert.equal(savedUpdate.$inc.version, 1);
+  assert.equal(Object.hasOwn(property.info.toObject(), "check_in_time"), false);
+  assert.equal(Object.hasOwn(property.info.toObject(), "check_out_time"), false);
+});
+
+test("legacy cleanup retains explicit saved ranges and leaves modern properties unmodified", () => {
+  const raw = validProperty({
+    check_in_time_from: "18:00", check_in_time_to: "12:00",
+    check_out_time_from: "05:00", check_out_time_to: "08:00"
+  }).toObject();
+  const modern = Property.hydrate({ ...raw, info: { ...raw.info } });
+  assert.equal(modern.isModified("info.check_in_time_from"), false);
+  assert.equal(modern.$getChanges().$unset, undefined);
+
+  raw.info.check_in_time = "14:00";
+  raw.info.check_out_time = "11:00";
+  const property = Property.hydrate(raw);
+  const changes = property.$getChanges();
+  assert.equal(changes.$set["info.check_in_time_from"], "18:00");
+  assert.equal(changes.$set["info.check_in_time_to"], "12:00");
+  assert.equal(changes.$set["info.check_out_time_from"], "05:00");
+  assert.equal(changes.$set["info.check_out_time_to"], "08:00");
+  assert.equal(changes.$unset["info.check_in_time"], 1);
+  assert.equal(changes.$unset["info.check_out_time"], 1);
+});
+
+test("every stay time range endpoint is required", async () => {
+  for (const field of ["check_in_time_from", "check_in_time_to", "check_out_time_from", "check_out_time_to"]) {
+    const property = validProperty({ [field]: "" });
+    await assert.rejects(property.validate(), error => {
+      assert.ok(error.errors["info." + field]);
+      return true;
+    });
+  }
 });
 
 test("rejects coordinates and star categories outside their valid ranges", async () => {

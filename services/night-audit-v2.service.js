@@ -41,9 +41,12 @@ function dailyCharges(reservation, invoices, day) {
     const adjusted = creditedComponents(invoice);
     for (const line of invoice.line_items || []) {
       if (!["accommodation", "meal"].includes(line.source_type)) continue;
-      const net = portion(line.net_amount, count, index), tax = portion(line.tax_amount, count, index);
-      const adjustedNet = portion(adjusted.get(`${line._id}:net_amount`), count, index);
-      const adjustedTax = portion(adjusted.get(`${line._id}:tax_amount`), count, index);
+      if (line.exact_service_date && dateKey(line.service_date) !== dateKey(day)) continue;
+      const lineDays = line.exact_service_date ? 1 : count;
+      const lineDay = line.exact_service_date ? 0 : index;
+      const net = portion(line.net_amount, lineDays, lineDay), tax = portion(line.tax_amount, lineDays, lineDay);
+      const adjustedNet = portion(adjusted.get(`${line._id}:net_amount`), lineDays, lineDay);
+      const adjustedTax = portion(adjusted.get(`${line._id}:tax_amount`), lineDays, lineDay);
       lines.push({ reservation_id: String(reservation._id), reservation_no: reservation.reservation_no, guest: reservation.booker?.name || "",
         invoice_id: String(invoice._id), invoice_no: invoice.invoice_no, line_id: String(line._id), room: line.room_number || "", category: line.source_type,
         currency: invoice.currency, net, tax, credit: money(net + tax - adjustedNet - adjustedTax), total: money(adjustedNet + adjustedTax),

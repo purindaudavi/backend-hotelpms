@@ -40,12 +40,14 @@ const authRoutes = require("./routes/auth");
 const notificationRoutes = require("./routes/notifications");
 const financialTargetRoutes = require("./routes/financial-targets");
 const financeRoutes = require("./routes/finance");
+const publicIbeRoutes = require("./routes/public-ibe");
 
 const app = express();
 const { authenticateWorkspace, requirePropertyAccess, requireDemoReadAccess, isPublicPropertyMedia } = require("./services/property-access.service");
 const port = Number(process.env.PORT) || 3500;
 const frontendOrigin = process.env.FRONTEND_ORIGIN || "http://localhost:3000";
 
+app.use("/api/public/ibe", cors({ origin: "*", methods: ["GET", "POST"], allowedHeaders: ["Content-Type", "X-IBE-API-Key"] }), publicIbeRoutes);
 app.use(cors({ origin: frontendOrigin }));
 app.use("/api/money-requests", express.json({ limit: "5mb" }));
 app.use(express.json({ limit: "1mb" }));

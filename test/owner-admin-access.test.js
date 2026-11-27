@@ -134,6 +134,39 @@ test("Owner/Admin HTTP access, role changes, revocation and owner-only settings"
   assert.equal((await request(owner, settings, "PATCH", { owner_id: admin._id })).status, 400);
   assert.equal((await request(admin, settings, "PATCH", { info: { administrator_ids: [admin._id] } })).status, 400);
   assert.equal(String(records.get("hotel-one").owner_id), String(owner._id));
+
+  const stayTimes = {
+    check_in_time_from: "18:00",
+    check_in_time_to: "12:00",
+    check_out_time_from: "05:00",
+    check_out_time_to: "08:00"
+  };
+  const savedTimes = await request(admin, settings, "PATCH", { info: stayTimes });
+  assert.equal(savedTimes.status, 200, await savedTimes.clone().text());
+  const savedProperty = (await savedTimes.json()).property;
+  for (const [field, time] of Object.entries(stayTimes)) {
+    assert.equal(savedProperty.info[field], time);
+    assert.equal(records.get("hotel-one").info[field], time);
+  }
+  assert.equal(savedProperty.info.check_in_time, "18:00", "older clients receive the current From time");
+  const reopened = (await (await request(owner, "/properties/hotel-one")).json()).property;
+  assert.equal(reopened.info.check_in_time_to, "12:00");
+  assert.equal(reopened.info.check_out_time_to, "08:00");
+  assert.ok(audits.some(item => item.action === "property_info_updated" &&
+    item.actor.user_id === String(admin._id) &&
+    item.changes.some(change => change.field === "info.check_in_time_to" && change.to === "12:00")));
+  assert.equal((await request(owner, settings, "PATCH", { info: { check_in_time_to: "25:00" } })).status, 400);
+  assert.equal((await request(owner, settings, "PATCH", { info: { check_out_time_from: "" } })).status, 400);
+  assert.equal((await request(outsider, settings, "PATCH", { info: stayTimes })).status, 403);
+  assert.equal(records.get("hotel-one").info.check_in_time_to, "12:00", "invalid updates preserve saved ranges");
+  const legacySave = await request(owner, settings, "PATCH", {
+    info: { check_in_time: "17:00", check_in_time_from: "19:00", check_out_time: "06:00" }
+  });
+  assert.equal(legacySave.status, 200);
+  assert.equal(records.get("hotel-one").info.check_in_time_from, "19:00", "explicit From takes precedence");
+  assert.equal(records.get("hotel-one").info.check_out_time_from, "06:00");
+  assert.equal(records.get("hotel-one").info.check_out_time_to, "08:00", "partial updates preserve the To time");
+
   const members = (await (await request(owner, access)).json()).members;
   assert.equal(members.find((item) => item.id === String(admin._id)).role, "administrator");
   assert.equal(members.find((item) => item.id === String(owner._id)).role, "owner");

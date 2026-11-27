@@ -57,7 +57,8 @@ function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, curren
 
   const trendStart = dateFrom && dateTo ? reportStart : addDays(date, -6);
   const trendEnd = dateFrom && dateTo ? addDays(reportEnd, -1) : date;
-  const occupancyTrend = eachDay(trendStart, trendEnd).map((day) => {
+  const trendDays = eachDay(trendStart, trendEnd);
+  const occupancyForDay = (day) => {
     const occupied = occupiedRoomCount(reservations, day);
     return {
       date: isoDate(day),
@@ -65,7 +66,11 @@ function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, curren
       total_rooms: sellableRooms.length,
       occupancy: percentage(occupied, sellableRooms.length)
     };
-  });
+  };
+  const occupancyTrend = trendDays.map((day) => ({
+    ...occupancyForDay(day),
+    previous: occupancyForDay(addDays(day, -trendDays.length))
+  }));
 
   const monthlyOccupancy = [monthStart, nextMonthStart].map((start) => {
     const end = addMonths(start, 1);

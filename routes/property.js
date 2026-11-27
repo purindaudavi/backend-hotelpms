@@ -17,6 +17,7 @@ const { HousekeepingAttendant } = require("../db_models/housecleaning.model");
 const { accessiblePropertiesQuery, propertyRole } = require("../services/property-access.service");
 const { permissionsForProperty, hasPropertyPermission, requirePropertyPermission } = require("../services/property-permissions.service");
 const { withInventoryTransaction } = require("../services/inventory-transaction.service");
+const { getIbeSettings, saveIbeSettings } = require("../services/ibe-settings.service");
 const imageBodyParser = express.raw({
   type: ["image/jpeg", "image/png", "image/webp"],
   limit: "8mb"
@@ -39,8 +40,10 @@ const PROPERTY_INFO_FIELDS = [
   "phone",
   "email",
   "website",
-  "check_in_time",
-  "check_out_time",
+  "check_in_time_from",
+  "check_in_time_to",
+  "check_out_time_from",
+  "check_out_time_to",
   "home_currency",
   "language_code",
   "timezone",
@@ -354,6 +357,37 @@ router.get("/:propertyId", asyncHandler(async (req, res) => {
   if (["housekeeping", "finance"].includes(req.propertyRole)) return res.json({ property: { property_id: property.property_id,
     info: { hotel_name: property.info.hotel_name, pms_name: property.info.pms_name, timezone: property.info.timezone }, theme: serializePropertyTheme(property.theme) } });
   return res.status(200).json({ property: await serializeProperty(property) });
+}));
+
+router.get("/:propertyId/ibe-settings", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  return res.json(await getIbeSettings(req.authorizedProperty.property_id));
+}));
+
+router.put("/:propertyId/ibe-settings", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  const { version, settings } = req.body || {};
+  return res.json(await saveIbeSettings(req.authorizedProperty.property_id, version, settings));
+}));
+
+router.get("/:propertyId/ibe-activity", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const { listIbeActivity } = require("../services/ibe-api-activity.service");
+  return res.json(await listIbeActivity(req.authorizedProperty.property_id));
+}));
+
+router.get("/:propertyId/ibe-website-key", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  return res.json(await require("../services/ibe-website-key.service").getWebsiteKey(req.authorizedProperty.property_id));
+}));
+
+router.post("/:propertyId/ibe-website-key", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  return res.status(201).json(await require("../services/ibe-website-key.service").changeWebsiteKey(req));
+}));
+
+router.delete("/:propertyId/ibe-website-key", requirePropertyPermission("ibe.manage"), asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  return res.json(await require("../services/ibe-website-key.service").changeWebsiteKey(req, true));
 }));
 
 router.get("/:propertyId/theme", asyncHandler(async (req, res) => {
@@ -696,6 +730,13 @@ router.patch("/:propertyId/info", asyncHandler(async (req, res) => {
 }));
 
 function applyInfoPayload(info, payload) {
+  // Older clients can still submit a single time. Explicit range fields win.
+  for (const prefix of ["check_in_time", "check_out_time"]) {
+    if (Object.prototype.hasOwnProperty.call(payload, prefix) &&
+        !Object.prototype.hasOwnProperty.call(payload, prefix + "_from")) {
+      info[prefix + "_from"] = payload[prefix];
+    }
+  }
   for (const field of PROPERTY_INFO_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(payload, field)) {
       info[field] = payload[field] === "" && ["latitude", "longitude"].includes(field)
@@ -778,6 +819,9 @@ async function findMealAllocation(propertyId, allocationId) {
 
 async function serializeProperty(property) {
   const value = property.toObject({ virtuals: true });
+  // Keep single-time reads consistent for older clients during the transition.
+  value.info.check_in_time = value.info.check_in_time_from;
+  value.info.check_out_time = value.info.check_out_time_from;
   const roomTypes = await RoomType.find({ property_id: property.property_id })
     .select("physical_rooms.active")
     .lean();

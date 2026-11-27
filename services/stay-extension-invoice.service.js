@@ -8,7 +8,7 @@ const { DAY_MS, inventoryDay, inventoryRange } = require("./booking-inventory-da
 const eligibleStatuses = ["confirmed", "checked_in"];
 const postedStatuses = ["issued", "partially_paid", "paid", "credited"];
 const reservationFields = "property_id reservation_no status check_in check_out is_day_room currency rooms booker.name financial_summary.grand_total";
-const invoiceFields = "reservation_id invoice_no status currency grand_total paid_amount credited_amount stay_snapshot extension_of stay_override line_items.source_type line_items.source_id line_items.total_amount";
+const invoiceFields = "reservation_id invoice_no status currency grand_total paid_amount credited_amount stay_snapshot extension_of stay_override line_items.source_type line_items.source_id line_items.total_amount line_items.service_date line_items.exact_service_date";
 const dateLabel = (day) => new Date(day).toISOString().slice(0, 10);
 const lineTotal = (lines) => money(lines.reduce((sum, line) => sum + money(line.quantity * line.unit_price), 0));
 
@@ -40,6 +40,10 @@ function removedStayCharge(invoice, reservation) {
   const keptStart = (start - billed.start) / DAY_MS;
   const keptEnd = (end - billed.start) / DAY_MS;
   return invoice.line_items.filter(isStayCharge).reduce((sum, line) => {
+    if (line.exact_service_date) {
+      const serviceDay = inventoryDay(line.service_date);
+      return serviceDay >= start && serviceDay < end ? sum : money(sum + line.total_amount);
+    }
     const cents = Math.round(line.total_amount * 100);
     const extra = cents % nights;
     const keptCents = Math.floor(cents / nights) * (keptEnd - keptStart) + Math.min(extra, keptEnd) - Math.min(extra, keptStart);

@@ -36,6 +36,7 @@ test("builds live dashboard metrics from reservations and rooms", () => {
   assert.equal(summary.overview.occupied_rooms, 1);
   assert.equal(summary.overview.occupancy, 50);
   assert.equal(summary.overview.revenue, 12000);
+  assert.equal(summary.occupancy_trend.at(-1).previous.date, "2026-07-28");
   assert.equal(summary.booking_sources[0].label, "Direct");
   assert.equal(summary.booking_sources[0].room_nights, 2);
   assert.equal(summary.countries[0].label, "Sri Lanka");
@@ -98,4 +99,25 @@ test("uses the selected dashboard range for trends, sources, and countries", () 
   assert.deepEqual(summary.booking_sources, [{ label: "Direct", room_nights: 1 }]);
   assert.deepEqual(summary.countries, [{ label: "Sri Lanka", room_nights: 1 }]);
   assert.deepEqual(summary.monthly_room_nights, [{ month: "2026-08", room_nights: 1, cancelled: 0, no_show: 0 }]);
+});
+
+test("compares each occupancy day with the corresponding day of the previous inclusive range", () => {
+  const summary = buildDashboardSummary({
+    asOf: "2026-08-04",
+    dateFrom: "2026-08-01",
+    dateTo: "2026-08-02",
+    roomTypes: [{ physical_rooms: [room("room-1", "101"), room("room-2", "102")] }],
+    reservations: [
+      reservation({ check_in: "2026-07-30", check_out: "2026-07-31" }),
+      reservation({ check_in: "2026-08-02", check_out: "2026-08-03" }),
+      reservation({ check_in: "2026-08-02", check_out: "2026-08-03", rooms: [{ physical_room_id: "room-2" }] })
+    ]
+  });
+
+  assert.deepEqual(summary.occupancy_trend, [
+    { date: "2026-08-01", occupied_rooms: 0, total_rooms: 2, occupancy: 0,
+      previous: { date: "2026-07-30", occupied_rooms: 1, total_rooms: 2, occupancy: 50 } },
+    { date: "2026-08-02", occupied_rooms: 2, total_rooms: 2, occupancy: 100,
+      previous: { date: "2026-07-31", occupied_rooms: 0, total_rooms: 2, occupancy: 0 } }
+  ]);
 });

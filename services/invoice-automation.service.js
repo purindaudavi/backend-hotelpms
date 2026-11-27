@@ -44,7 +44,9 @@ const INVOICE_STATUSES_REQUIRING_CORRECTION = new Set([
 async function ensureInvoiceForConfirmedReservation({
   reservation,
   requestId = "",
-  session
+  session,
+  lineItems,
+  billingSnapshot
 }) {
   if (reservation.status !== "confirmed") {
     return { created: false, invoice: null };
@@ -80,7 +82,7 @@ async function ensureInvoiceForConfirmedReservation({
     reservation_no: reservation.reservation_no,
     guest_id: guest._id,
     billing_type: "guest",
-    billing_snapshot: {
+    billing_snapshot: billingSnapshot ?? {
       name: guest.name,
       email: guest.email,
       phone: guest.phone,
@@ -98,7 +100,7 @@ async function ensureInvoiceForConfirmedReservation({
     invoice_date: invoiceDate,
     due_date: invoiceDate,
     currency: reservation.currency,
-    line_items: buildAccommodationLines(reservation),
+    line_items: lineItems ?? buildAccommodationLines(reservation),
     status: "issued",
     notes: `Automatically created and issued when reservation ${reservation.reservation_no} was confirmed.`,
     created_by: SYSTEM_ACTOR,

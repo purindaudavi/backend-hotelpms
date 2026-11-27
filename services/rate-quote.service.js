@@ -39,7 +39,9 @@ async function quoteRatePlan({
 
   const planQuery = RatePlan.findOne({ _id: ratePlanId, property_id: propertyId });
   const roomQuery = RoomType.findOne({ _id: roomTypeId, property_id: propertyId });
-  const [plan, roomType] = await Promise.all([session ? planQuery.session(session) : planQuery, session ? roomQuery.session(session) : roomQuery]);
+  const [plan, roomType] = session
+    ? [await planQuery.session(session), await roomQuery.session(session)]
+    : await Promise.all([planQuery, roomQuery]);
   if (!plan) throw httpError(404, "Rate plan not found for this property.");
   if (!roomType) throw httpError(404, "Room type not found for this property.");
   if (!allowInactive && !plan.active) {

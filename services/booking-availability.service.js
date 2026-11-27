@@ -123,42 +123,7 @@ async function validateReservationInventory({
   // one-night bookings must not consume two rooms on both nights. A day-use
   // request checks one calendar day through these same capacity calculations.
   for (let night = range.start; night < range.end; night += DAY_MS) {
-    const usedByType = new Map();
-    const pickedByAllocation = new Map();
-    for (const reservation of overlappingReservations) {
-      if (!occupiesInventoryDay(reservation, night)) continue;
-      for (const room of reservation.rooms) {
-        if (room.business_block_allocation_id) {
-          const allocationId = String(room.business_block_allocation_id);
-          pickedByAllocation.set(
-            allocationId,
-            (pickedByAllocation.get(allocationId) || 0) + 1
-          );
-        }
-        if (
-          linkedBusinessBlockId &&
-          String(reservation.business_block_id || "") === String(linkedBusinessBlockId)
-        ) {
-          continue;
-        }
-        const typeId = String(room.room_type_id);
-        usedByType.set(typeId, (usedByType.get(typeId) || 0) + 1);
-      }
-    }
-
-    const heldByType = new Map();
-    for (const block of activeBlocks) {
-      if (!occupiesInventoryDay(block, night)) continue;
-      for (const allocation of block.allocations) {
-        const picked = pickedByAllocation.get(String(allocation._id)) || 0;
-        const remainingHold = Math.max(
-          allocation.quantity - allocation.released_quantity - picked,
-          0
-        );
-        const typeId = String(allocation.room_type_id);
-        heldByType.set(typeId, (heldByType.get(typeId) || 0) + remainingHold);
-      }
-    }
+    const { usedByType, heldByType } = inventoryUsageForDay(night, overlappingReservations, activeBlocks, linkedBusinessBlockId);
 
     for (const [typeId, requested] of requestedByType) {
       const available = Math.max(
@@ -173,6 +138,46 @@ async function validateReservationInventory({
       }
     }
   }
+}
+
+function inventoryUsageForDay(night, overlappingReservations, activeBlocks, linkedBusinessBlockId) {
+  const usedByType = new Map();
+  const pickedByAllocation = new Map();
+  for (const reservation of overlappingReservations) {
+    if (!occupiesInventoryDay(reservation, night)) continue;
+    for (const room of reservation.rooms) {
+      if (room.business_block_allocation_id) {
+        const allocationId = String(room.business_block_allocation_id);
+        pickedByAllocation.set(
+          allocationId,
+          (pickedByAllocation.get(allocationId) || 0) + 1
+        );
+      }
+      if (
+        linkedBusinessBlockId &&
+        String(reservation.business_block_id || "") === String(linkedBusinessBlockId)
+      ) {
+        continue;
+      }
+      const typeId = String(room.room_type_id);
+      usedByType.set(typeId, (usedByType.get(typeId) || 0) + 1);
+    }
+  }
+
+  const heldByType = new Map();
+  for (const block of activeBlocks) {
+    if (!occupiesInventoryDay(block, night)) continue;
+    for (const allocation of block.allocations) {
+      const picked = pickedByAllocation.get(String(allocation._id)) || 0;
+      const remainingHold = Math.max(
+        allocation.quantity - (allocation.released_quantity ?? 0) - picked,
+        0
+      );
+      const typeId = String(allocation.room_type_id);
+      heldByType.set(typeId, (heldByType.get(typeId) || 0) + remainingHold);
+    }
+  }
+  return { usedByType, heldByType };
 }
 
 function occupiesInventoryDay(record, night) {
@@ -347,6 +352,7 @@ function sum(items, key) {
 
 module.exports = {
   getBusinessBlockMetrics,
+  inventoryUsageForDay,
   occupyAssignedRooms,
   releaseAssignedRoomsAfterCheckout,
   validateBusinessBlockInventory,
