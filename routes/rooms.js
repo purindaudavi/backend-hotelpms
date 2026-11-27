@@ -1,6 +1,9 @@
 const express = require("express");
 const mongoose = require("mongoose");
 const RoomType = require("../db_models/rooms.model");
+const UnassignedRoom = require("../db_models/unassigned-room.model");
+const { requirePropertyPermission } = require("../services/property-permissions.service");
+const { syncRoomNumbers, transferPhysicalRoom, assertRoomNumbersAvailable, assertRoomIdentityUnreferenced } = require("../services/room-assignment.service");
 const { withInventoryTransaction } = require("../services/inventory-transaction.service");
 const { validateRoomCatalogChange, assertManualOccupancy } = require("../services/room-integrity.service");
 
@@ -50,7 +53,9 @@ router.get("/", asyncHandler(async (req, res) => {
   const roomTypes = await RoomType.find(query).sort({ name: 1 });
   return res.status(200).json({
     count: roomTypes.length,
-    room_types: roomTypes.map((roomType) => serializeRoomType(roomType, req))
+    room_types: roomTypes.map((roomType) => serializeRoomType(roomType, req)),
+    unassigned_rooms: ["owner", "administrator"].includes(req.propertyRole)
+      ? (await UnassignedRoom.find({ property_id: propertyId })).map(room => serializeUnassignedRoom(room)) : []
   });
 }));
 
@@ -67,11 +72,36 @@ router.get("/physical-rooms", asyncHandler(async (req, res) => {
     const serialized = serializeRoomType(roomType, req);
     return serialized.physical_rooms;
   });
+  if (["owner", "administrator"].includes(req.propertyRole)) {
+    physicalRooms.push(...(await UnassignedRoom.find({ property_id: propertyId })).map(serializeUnassignedRoom));
+  }
 
   return res.status(200).json({
     count: physicalRooms.length,
     physical_rooms: physicalRooms
   });
+}));
+
+router.patch("/physical-rooms/:physicalRoomId/assignment", requirePropertyPermission("rooms.assignment.manage"), asyncHandler(async (req, res) => {
+  if (!Object.hasOwn(req.body || {}, "room_type_id")) throw roomError(400, "room_type_id is required; use null to unassign the room.");
+  const result = await withInventoryTransaction(getPropertyId(req), session => transferPhysicalRoom({
+    propertyId: getPropertyId(req), roomId: req.params.physicalRoomId, targetTypeId: req.body.room_type_id,
+    expectedTypeId: Object.hasOwn(req.body, "expected_room_type_id") ? req.body.expected_room_type_id : undefined,
+    changes: normalizePhysicalRoomPayload(req.body), session
+  }));
+  res.json({ message: result.type ? "Room assigned successfully." : "Room kept as Unassigned. It is not available for booking.",
+    physical_room: result.type ? serializePhysicalRoom(result.type, result.room) : serializeUnassignedRoom(result.room) });
+}));
+
+router.delete("/unassigned-physical-rooms/:physicalRoomId", requirePropertyPermission("rooms.delete"), asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.physicalRoomId)) throw roomError(404, "Physical room not found.");
+  await withInventoryTransaction(getPropertyId(req), async session => {
+    const room = await UnassignedRoom.findOne({ property_id: getPropertyId(req), _id: req.params.physicalRoomId }).session(session);
+    if (!room) throw roomError(404, "Unassigned room not found.");
+    await assertRoomIdentityUnreferenced(getPropertyId(req), room, session);
+    await room.deleteOne({ session });
+  });
+  res.json({ message: "Physical room deleted successfully." });
 }));
 
 router.post("/", asyncHandler(async (req, res) => {
@@ -96,6 +126,11 @@ router.post("/", asyncHandler(async (req, res) => {
     if (Array.isArray(payload.physical_rooms)) {
       roomType.physical_rooms = payload.physical_rooms.map(normalizePhysicalRoomPayload);
     }
+    if (Object.hasOwn(payload, "room_numbers")) {
+      assertCanManageAssignments(req);
+      await syncRoomNumbers(roomType, payload.room_numbers, session);
+    }
+    await assertRoomNumbersAvailable(roomType.property_id, roomType.physical_rooms, session, roomType._id);
     await validateRoomCatalogChange({ after: roomType, session });
     await roomType.save({ session });
     return roomType;
@@ -127,10 +162,15 @@ router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
   }
 
   const roomType = await mutateRoomType(req, async (roomType, session) => {
+    if (Object.hasOwn(payload, "expected_version") && payload.expected_version !== roomType.__v) throw roomError(409, "This room type changed. Close and reopen the editor before saving again.");
     const before = roomType.toObject();
     applyRoomTypePayload(roomType, payload, { includePropertyId: false });
     if (before.name !== roomType.name && !["owner", "administrator"].includes(req.propertyRole)) {
       throw roomError(403, "Only the property Owner or Administrator can rename a room type.");
+    }
+    if (Object.hasOwn(payload, "room_numbers")) {
+      assertCanManageAssignments(req);
+      await syncRoomNumbers(roomType, payload.room_numbers, session);
     }
     await validateRoomCatalogChange({ before, after: roomType, session });
     await roomType.save({ session });
@@ -143,8 +183,9 @@ router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
   });
 }));
 
-router.delete("/:roomTypeId", asyncHandler(async (req, res) => {
+router.delete("/:roomTypeId", requirePropertyPermission("rooms.delete"), asyncHandler(async (req, res) => {
   const imageIds = await mutateRoomType(req, async (roomType, session) => {
+    for (const room of roomType.physical_rooms) await assertRoomIdentityUnreferenced(roomType.property_id, room, session);
     await validateRoomCatalogChange({ before: roomType.toObject(), deleting: true, session });
     const imageIds = roomType.images.map((image) => image.file_id);
     await roomType.deleteOne({ session });
@@ -162,6 +203,7 @@ router.post("/:roomTypeId/physical-rooms", asyncHandler(async (req, res) => {
   const roomType = await mutateRoomType(req, async (roomType, session) => {
     roomType.physical_rooms.push(normalizePhysicalRoomPayload(req.body || {}));
     assertManualOccupancy(null, roomType.physical_rooms[roomType.physical_rooms.length - 1]);
+    await assertRoomNumbersAvailable(roomType.property_id, roomType.physical_rooms, session, roomType._id);
     await roomType.save({ session });
     return roomType;
   });
@@ -179,6 +221,7 @@ router.patch("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (
     if (!physicalRoom) throw roomError(404, "Physical room not found.");
     const before = roomType.toObject();
     applyPhysicalRoomPayload(physicalRoom, req.body || {});
+    await assertRoomNumbersAvailable(roomType.property_id, roomType.physical_rooms, session, roomType._id);
     await validateRoomCatalogChange({ before, after: roomType, physicalRoomId: physicalRoom._id, session });
     await roomType.save({ session });
     return roomType;
@@ -191,7 +234,7 @@ router.patch("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (
   });
 }));
 
-router.delete("/:roomTypeId/physical-rooms/:physicalRoomId", asyncHandler(async (req, res) => {
+router.delete("/:roomTypeId/physical-rooms/:physicalRoomId", requirePropertyPermission("rooms.delete"), asyncHandler(async (req, res) => {
   await mutateRoomType(req, async (roomType, session) => {
     const physicalRoom = roomType.physical_rooms.id(req.params.physicalRoomId);
     if (!physicalRoom) throw roomError(404, "Physical room not found.");
@@ -405,6 +448,10 @@ function roomError(statusCode, message) {
   return Object.assign(new Error(message), { statusCode });
 }
 
+function assertCanManageAssignments(req) {
+  if (!["owner", "administrator"].includes(req.propertyRole)) throw roomError(403, "Only the property Owner or Administrator can assign or unassign rooms.");
+}
+
 async function findRoomType(req, session) {
   if (!mongoose.isValidObjectId(req.params.roomTypeId)) return null;
   const query = { _id: req.params.roomTypeId };
@@ -453,6 +500,8 @@ function normalizeEnum(value) {
 
 function serializeRoomType(roomType, req) {
   const result = roomType.toObject({ virtuals: true });
+  result.version = roomType.__v;
+  delete result.__v;
   result.physical_rooms = roomType.physical_rooms.map((physicalRoom) =>
     serializePhysicalRoom(roomType, physicalRoom)
   );
@@ -468,6 +517,12 @@ function serializePhysicalRoom(roomType, physicalRoom) {
     room_type_id: roomType._id,
     room_type: roomType.name
   };
+}
+
+function serializeUnassignedRoom(room) {
+  const result = room.toObject();
+  delete result.__v;
+  return { ...result, room_type_id: null, room_type: "Unassigned" };
 }
 
 function serializeImage(roomType, image, req) {

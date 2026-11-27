@@ -1,7 +1,7 @@
 // Property roles are independent of global account/reviewer roles. General
 // members keep their existing operational access until department roles ship.
 const OPERATIONAL_PERMISSIONS = ["operations.manage", "settings.manage"];
-const ADMIN_PERMISSIONS = [...OPERATIONAL_PERMISSIONS, "channels.manage", "staff.manage", "housekeeping.staff.manage", "housekeeping.assign", "housekeeping.request", "ibe.manage"];
+const ADMIN_PERMISSIONS = [...OPERATIONAL_PERMISSIONS, "channels.manage", "staff.manage", "housekeeping.staff.manage", "housekeeping.assign", "housekeeping.request", "ibe.manage", "rooms.assignment.manage", "rooms.delete"];
 const FRONT_DESK_PERMISSIONS = ["dashboard.operations.read", "reservations.manage", "guests.manage", "rooms.read", "rates.read", "housekeeping.read", "housekeeping.assign", "housekeeping.request", "agents.read", "invoices.read", "payments.record", "notifications.operations.read"];
 const FINANCE_REPORT_TYPES = Object.freeze(["collection-report", "deposit-ledger", "profit-loss", "revenue-report", "revenue-forecast", "invoice-daybook", "customer-balance-summary", "ar-aging-summary", "in-house-guest-ledger", "travel-agent-performance"]);
 const FINANCE_PERMISSIONS = ["dashboard.finance.read", "financials.manage", "reservations.billing.read", "reports.finance.read", "night-audit.read", "notifications.finance.read"];

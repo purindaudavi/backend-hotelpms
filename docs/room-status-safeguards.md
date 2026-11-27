@@ -117,7 +117,66 @@ disabling, type deletion, occupied creation and `force=true` bypass attempts.
 
 No database migration or bulk rewrite of historical records is required.
 
-## Automated checks
+For the separate fix allowing multiple room types to have no physical rooms,
+including removal of a type's last unused room, see
+[Physical room-number index](physical-room-number-index.md). Existing databases
+need its targeted index migration; the room safety rules above still apply.
+
+## Room unassignment and reassignment (2026-11-27)
+
+- In Edit Room Type → Physical Rooms, removing a saved room with × and saving
+  **unassigns** it. It remains in Physical Room List with Room Type = Unassigned.
+  Cancel does not persist the change. Removing a newly entered, unsaved number
+  simply cancels that addition.
+- Owner/Admin can assign it through Physical Room List → Edit → Room Type, or
+  through another type's **Assign an existing unassigned room** selector.
+- Only Owner/Admin may unassign, transfer or permanently delete rooms. These
+  checks are enforced on the backend, including direct DELETE requests from
+  legacy general members. No separate Manager role was introduced.
+- Unassignment keeps the physical-room `_id`, number, floor, operational and
+  cleaning details, notes and creation timestamp. Reservations, invoices, saved
+  rate plans and completed housekeeping history remain unchanged. Direct type
+  transfers also retain the same room ID.
+- Assigned rooms continue using the existing `room_types.physical_rooms` storage.
+  Only unassigned rooms are stored in `unassigned_physical_rooms`. They are
+  returned separately as `unassigned_rooms` to Owner/Admin; the ordinary room
+  catalog, Front Desk inventory, dashboard and IBE do not treat them as stock.
+  No bulk migration of existing rooms is needed. Include the new collection in
+  property backups. The room-number index fix described above still applies.
+- Assignment changes use the same property inventory transaction as bookings.
+  Occupied rooms, current/future physical assignments, open housekeeping work,
+  and insufficient remaining type capacity (including unassigned bookings and
+  group holds) reject the change. Failed batch saves roll back type details and
+  all room changes. Past history alone does not prevent unassignment, but still
+  prevents permanent deletion/renumbering after a transfer.
+- New/renamed room numbers are checked across assigned and unassigned rooms.
+  The editor submits `expected_version`; Physical Room List submits
+  `expected_room_type_id`, so stale saves and simultaneous claims are rejected.
+
+API: PATCH `/api/rooms/:roomTypeId` with `room_numbers` performs the assignment
+changes atomically with type details. POST `/api/rooms` accepts that field for a
+new type. PATCH `/api/rooms/physical-rooms/:physicalRoomId/assignment` accepts
+`room_type_id` (null means Unassigned). Permanent deletion remains separate in
+Physical Room List, using the existing assigned-room DELETE endpoint or DELETE
+`/api/rooms/unassigned-physical-rooms/:physicalRoomId`.
+
+Regression test: `node --test test/room-assignment.test.js`. It starts a disposable
+local MongoDB replica set; set `MONGOD_BINARY` when MongoDB is installed elsewhere.
+It never uses the application database URI. Checks cover preserved history/IDs,
+role/property boundaries, duplicate numbers, IBE exclusion, rollback, occupied
+rooms, future reservations, housekeeping, stale saves and concurrent assignments.
+
+Browser verification uses a disposable API/database and intercepts all API calls:
+× + save → Unassigned, both themes, reassignment from Physical Room List and the
+room-type selector. No DELETE request occurs when unassigning.
+
+Verification for this change: 124 relevant backend tests passed, including the
+real MongoDB/API integration scenarios above. Frontend TypeScript and the
+browser walkthrough passed; the Unassigned pill was visually checked in both
+themes. The final preview used its own build cache and disabled the development
+inspector only for that temporary preview process.
+
+## Earlier safeguard checks
 
 From `D:\DMS new\hotelbackend`:
 

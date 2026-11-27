@@ -27,6 +27,7 @@
     "start": "node app.js",
     "dev": "nodemon app.js",
     "serve": "node app.js",
+    "migrate:room-number-index": "node scripts/migrate-room-number-index.js",
     "smoke:bookings": "node scripts/live-bookings-smoke.js",
     "smoke:rates": "node scripts/live-rates-smoke.js",
     "smoke:financials": "node scripts/live-financial-documents-smoke.js",

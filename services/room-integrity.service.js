@@ -95,7 +95,8 @@ async function validateRoomCatalogChange({ before, after, physicalRoomId, deleti
   const today = inventoryDay(property?.business_date || new Date());
   // Include soft-deleted and completed reservations for deletion/rename safety.
   const reservations = await Reservation.find({ property_id: propertyId, $or: [
-    { "rooms.room_type_id": before._id }, { "room_moves.room_type_id": before._id }
+    { "rooms.room_type_id": before._id }, { "room_moves.room_type_id": before._id },
+    ...(physicalRoomId ? [{ "rooms.physical_room_id": physicalRoomId }, { "room_moves.from_physical_room_id": physicalRoomId }, { "room_moves.to_physical_room_id": physicalRoomId }] : [])
   ] }, { reservation_no: 1, status: 1, deleted_at: 1, check_in: 1, check_out: 1, is_day_room: 1, rooms: 1, room_moves: 1 }).session(session);
   const blocks = await BusinessBlock.find({ property_id: propertyId, "allocations.room_type_id": before._id },
     { block_number: 1, status: 1, deleted_at: 1, check_in: 1, check_out: 1, allocations: 1 }).session(session);

@@ -231,8 +231,10 @@ RoomTypeSchema.index(
   { property_id: 1, "physical_rooms.room_number": 1 },
   {
     unique: true,
-    sparse: true,
-    name: "unique_physical_room_number_per_property"
+    // A compound sparse index still includes empty types because property_id
+    // exists. Only index types that actually contain a room number.
+    partialFilterExpression: { "physical_rooms.room_number": { $type: "string" } },
+    name: "unique_nonempty_physical_room_number_per_property"
   }
 );
 
@@ -302,5 +304,6 @@ const RoomType =
   mongoose.model("RoomType", RoomTypeSchema, "room_types");
 
 module.exports = RoomType;
+module.exports.PhysicalRoomSchema = PhysicalRoomSchema;
 module.exports.OPERATIONAL_STATUSES = OPERATIONAL_STATUSES;
 module.exports.HOUSEKEEPING_STATUSES = HOUSEKEEPING_STATUSES;
