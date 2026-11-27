@@ -81,15 +81,16 @@ async function validateRoomCatalogChange({ before, after, physicalRoomId, deleti
     for (const room of before.physical_rooms) assertManualOccupancy(room, null);
   }
   // Harmless catalog/housekeeping edits need no reservation scan. Check every
-  // capacity reduction and identity change against persisted references.
+  // capacity reduction and physical identity change against persisted references.
+  // A room-type display name can change: links use its immutable _id and
+  // reservations/invoices keep their own historical descriptions.
   const reduction = deleting || capacity(after) < capacity(before);
   const disabling = !deleting && (oldRoom
     ? oldRoom.active !== false && newRoom.active === false
     : before.active !== false && after.active === false);
   const identityChange = oldRoom && newRoom && oldRoom.room_number !== newRoom.room_number;
-  const typeRename = !physicalRoomId && !deleting && before.name !== after.name;
   const occupancyChange = oldRoom && newRoom && oldRoom.operational_status !== newRoom.operational_status;
-  if (!reduction && !disabling && !identityChange && !typeRename && !occupancyChange) return;
+  if (!reduction && !disabling && !identityChange && !occupancyChange) return;
   const property = await Property.findOne({ property_id: propertyId }, { business_date: 1 }).session(session);
   const today = inventoryDay(property?.business_date || new Date());
   // Include soft-deleted and completed reservations for deletion/rename safety.
@@ -120,10 +121,10 @@ async function validateRoomCatalogChange({ before, after, physicalRoomId, deleti
     if (inHouse || upcoming) throw conflict(`Room type ${before.name} is needed by ${label(inHouse || upcoming)}. Reassign or cancel its reservations before disabling or deleting it.`);
     if (group) throw conflict(`Room type ${before.name} is needed by group ${group.block_number}. Release or reassign that group before disabling or deleting it.`);
   }
-  if ((deleting && !physicalRoomId) || typeRename) {
+  if (deleting && !physicalRoomId) {
     if (reservations.length || blocks.length) throw conflict(`Room type ${before.name} has reservation/group history. Keep its identity and disable it when no active stays remain instead of deleting or renaming it.`);
   }
-  if (deleting || identityChange || typeRename) {
+  if (deleting || identityChange) {
     for (const Model of [HousekeepingTask, HousekeepingActivity]) {
       if (await Model.exists({ property_id: propertyId, ...(oldRoom ? { physical_room_id: oldRoom._id } : { room_type_id: before._id }) }).session(session)) {
         throw conflict("This room has housekeeping history. Keep its identity and disable it when no active stays remain instead of deleting or renaming it.");

@@ -145,6 +145,27 @@ test("harmless notes and cleaning-status changes need no reference queries", asy
   await change(before, type, type.physical_rooms[0]._id);
 });
 
+test("renaming a room type preserves its IDs, rooms and price despite existing history", async (t) => {
+  const type = fixture(); const before = type.toObject();
+  const record = booking(type, { status: "checked_in" });
+  stub(t, { reservations: [record], rates: { _id: "rate" }, tasks: { _id: "task" } });
+  type.name = "Garden Standard";
+  await change(before, type);
+  await type.validate();
+  assert.equal(String(type._id), String(before._id));
+  assert.deepEqual(type.physical_rooms.toObject(), before.physical_rooms);
+  assert.equal(type.base_rate, before.base_rate);
+  assert.equal(type.slug, "garden-standard");
+  assert.equal(Reservation.find.mock.callCount(), 0);
+});
+
+test("renaming cannot bypass capacity or disable safeguards in the same request", async (t) => {
+  const type = fixture(1); const before = type.toObject();
+  stub(t, { reservations: [booking(type)] });
+  type.name = "Garden Standard"; type.active = false;
+  await assert.rejects(change(before, type), /needed by/);
+});
+
 test("disabling an already non-sellable physical room still checks future references", async (t) => {
   const type = fixture(); type.physical_rooms[0].operational_status = "maintenance";
   const before = type.toObject(); stub(t, { reservations: [booking(type)] });

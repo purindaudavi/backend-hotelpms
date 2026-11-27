@@ -22,10 +22,13 @@ They do not restrict or replace the reservation-status dropdown.
   reservations count on their arrival day, despite having zero overnight nights.
 - Room types needed by in-house/upcoming reservations or unreleased upcoming
   active/tentative groups cannot be disabled/deleted.
-- Past reservation/move history prevents hard deletion or renaming of referenced
-  room identities. Disabling is allowed once there is no active/future conflict.
-  Saved rate references protect room-type identities. Housekeeping history also
-  prevents deletion or renaming.
+- Past reservation/move history prevents hard deletion or renumbering of referenced
+  physical rooms. Disabling is allowed once there is no active/future conflict.
+  Saved rate references and housekeeping history also prevent deletion.
+- Owner/Admin may rename a room type's display name (updated 2026-11-27).
+  Its `_id`, physical room IDs, rates and booking links stay unchanged; historical
+  reservation, housekeeping and issued invoice descriptions are not rewritten.
+  Unique names per property and all disable/delete/capacity checks still apply.
 - The `force=true` deletion bypass was removed. The same safety checks apply to
   every authorized caller, including owners/administrators. This is not a new
   staff-role permission system; existing property authorization is unchanged.
@@ -92,6 +95,27 @@ scheduled end date. It does not assume repairs finish before a later arrival.
 Some backend-only actions, such as a physical room's `active=false`, are not
 exposed as controls in the existing Rooms UI. The automated API scenarios cover
 disabling, type deletion, occupied creation and `force=true` bypass attempts.
+
+### 5. Rename a room type without changing its identity
+
+1. Sign in as the property's Owner or Administrator. Open Room & Rates -> Rooms
+   -> Edit Room Type, change the name and save. Refresh to confirm it persists.
+2. Confirm the same physical room numbers and prices appear in Rooms and Rates.
+   The room type `_id` and physical room IDs in MongoDB must stay unchanged.
+3. Open a reservation created before the rename. Its existing room assignment,
+   dates and price remain unchanged; the editor selects the renamed type by ID.
+4. Check an unassigned Confirmed booking in Front Desk: it must still appear
+   under the renamed group and reduce availability on its stay dates.
+5. Check an issued invoice from before the rename: its description, amount,
+   status and payments stay unchanged. Historical snapshots are not migrated.
+6. If this type is offered through IBE, refresh/search the guest site. The new
+   name appears with the same pricing and availability rules.
+7. Try an existing type's name: the save must fail without changing either type.
+   Front Desk, Housekeeping, Finance and general members cannot rename types.
+   Renaming and disabling/deleting are separate actions; the latter still obey
+   reservation, housekeeping and capacity safeguards.
+
+No database migration or bulk rewrite of historical records is required.
 
 ## Automated checks
 

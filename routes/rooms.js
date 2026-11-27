@@ -129,6 +129,9 @@ router.patch("/:roomTypeId", asyncHandler(async (req, res) => {
   const roomType = await mutateRoomType(req, async (roomType, session) => {
     const before = roomType.toObject();
     applyRoomTypePayload(roomType, payload, { includePropertyId: false });
+    if (before.name !== roomType.name && !["owner", "administrator"].includes(req.propertyRole)) {
+      throw roomError(403, "Only the property Owner or Administrator can rename a room type.");
+    }
     await validateRoomCatalogChange({ before, after: roomType, session });
     await roomType.save({ session });
     return roomType;
