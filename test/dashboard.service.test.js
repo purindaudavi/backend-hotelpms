@@ -56,6 +56,75 @@ test("separates cancelled and no-show reservations from occupied room nights", (
   assert.equal(august.cancelled, 1);
   assert.equal(august.no_show, 1);
   assert.equal(summary.overview.revenue, 0);
+  assert.deepEqual(summary.analytics.stay_metrics, { average_stay_nights: null, average_lead_days: null });
+});
+
+test("averages overnight stays by arrival month and includes same-day bookings in lead time", () => {
+  const { analytics } = buildDashboardSummary({
+    asOf: "2026-08-09",
+    dateFrom: "2026-07-20",
+    dateTo: "2026-07-31",
+    reservations: [
+      reservation({ status: "checked_out", reservation_date: new Date("2026-07-25T18:00:00Z"), rooms: [{}, {}] }),
+      reservation({ status: "checked_in", reservation_date: "2026-08-06", check_in: "2026-08-06", check_out: "2026-08-11" }),
+      reservation({ check_in: "2026-08-31", check_out: "2026-09-02", currency: "USD" }),
+      reservation({ check_in: "2026-08-10", check_out: "2026-08-15", reservation_date: "invalid" }),
+      reservation({ check_in: "2026-08-01", check_out: "2026-08-04", reservation_date: "2026-08-02" }),
+      reservation({ is_day_room: true, check_out: "2026-08-04", reservation_date: "2026-07-20" }),
+      reservation({ status: "cancelled", reservation_date: "2026-07-20" }),
+      reservation({ status: "no_show", reservation_date: "2026-07-20" }),
+      reservation({ status: "tentative", reservation_date: "2026-07-20" }),
+      reservation({ check_in: "2026-07-31", check_out: "2026-08-03", reservation_date: "2026-07-20" }),
+      reservation({ check_in: "2026-09-01", check_out: "2026-09-03", reservation_date: "2026-08-20" })
+    ]
+  });
+
+  assert.deepEqual(analytics.stay_metrics, { average_stay_nights: 3.4, average_lead_days: 5 });
+});
+
+test("reports checkout completion by room for the scheduled date and uses the property deadline", () => {
+  const summary = buildDashboardSummary({
+    asOf: "2026-08-06",
+    checkoutDeadline: "11:45",
+    reservations: [
+      reservation({ status: "checked_out", rooms: [{ physical_room_id: "room-1" }, { physical_room_id: "room-2" }] }),
+      reservation({ status: "checked_in" }),
+      reservation({ status: "cancelled" }),
+      reservation({ status: "checked_out", check_out: "2026-08-05" })
+    ]
+  });
+  assert.equal(summary.overview.departures, 2);
+  assert.equal(summary.overview.departure_rooms, 3);
+  assert.equal(summary.overview.checked_out_departure_rooms, 2);
+  assert.equal(summary.overview.checkout_deadline, "11:45");
+});
+
+test("compares reservation revenue through the same day in the previous month", () => {
+  const booking = (checkIn, overrides = {}) => reservation({ check_in: checkIn, check_out: "2026-08-06", ...overrides });
+  const summary = buildDashboardSummary({
+    asOf: "2026-08-04",
+    currency: "LKR",
+    reservations: [
+      booking("2026-08-04"),
+      booking("2026-08-05"),
+      booking("2026-07-04", { check_out: "2026-07-05", financial_summary: { grand_total: 10000 } }),
+      booking("2026-07-05", { check_out: "2026-07-06" }),
+      booking("2026-08-03", { status: "cancelled" }),
+      booking("2026-08-03", { currency: "USD" })
+    ]
+  });
+  assert.deepEqual(summary.overview.revenue_to_date, { current: 12000, previous: 10000, previous_month: "2026-07" });
+  assert.equal(summary.overview.revenue, 24000);
+  assert.equal(summary.analytics.monthly_performance.at(-1).revenue, 24000);
+});
+
+test("stops the previous-month comparison at the end of a shorter month", () => {
+  const { overview } = buildDashboardSummary({
+    asOf: "2026-03-31",
+    reservations: [reservation({ check_in: "2026-02-28", check_out: "2026-03-01" }),
+      reservation({ check_in: "2026-03-01", check_out: "2026-03-02", financial_summary: { grand_total: 2300 } })]
+  });
+  assert.deepEqual(overview.revenue_to_date, { current: 2300, previous: 12000, previous_month: "2026-02" });
 });
 
 test("rejects invalid dashboard dates and currencies", () => {

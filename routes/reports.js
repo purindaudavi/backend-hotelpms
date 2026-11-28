@@ -23,6 +23,7 @@ router.get("/catalog", (req, res) => {
 router.get("/dashboard", asyncHandler(async (req, res) => {
   const dashboard = await getDashboardSummary({
     propertyId: requirePropertyId(req),
+    checkoutDeadline: req.authorizedProperty?.info?.check_out_time_to,
     asOf: req.query.as_of || new Date(),
     currency: req.query.currency || "",
     dateFrom: req.query.date_from,

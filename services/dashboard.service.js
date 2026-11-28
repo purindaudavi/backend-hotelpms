@@ -5,7 +5,7 @@ const OCCUPANCY_STATUSES = new Set(["confirmed", "checked_in", "checked_out"]);
 const ARRIVAL_STATUSES = new Set(["tentative", "confirmed", "checked_in"]);
 const DEPARTURE_STATUSES = new Set(["confirmed", "checked_in", "checked_out"]);
 
-async function getDashboardSummary({ propertyId, asOf, currency = "", dateFrom, dateTo }) {
+async function getDashboardSummary({ propertyId, asOf, currency = "", dateFrom, dateTo, checkoutDeadline }) {
   const date = dateOnly(asOf || new Date(), "as_of");
   const [reservations, roomTypes] = await Promise.all([
     Reservation.find({ property_id: propertyId, deleted_at: { $exists: false } }).lean(),
@@ -17,19 +17,25 @@ async function getDashboardSummary({ propertyId, asOf, currency = "", dateFrom, 
     asOf: date,
     dateFrom,
     dateTo,
+    checkoutDeadline,
     currency: normalizeCurrency(currency) || inferCurrency(reservations, roomTypes),
     reservations,
     roomTypes
   });
 }
 
-function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, currency = "LKR", reservations = [], roomTypes = [] }) {
+function buildDashboardSummary({
+  propertyId = "", asOf, dateFrom, dateTo, currency = "LKR",
+  reservations = [], roomTypes = [], checkoutDeadline = null
+}) {
   const date = dateOnly(asOf || new Date(), "as_of");
   const selectedCurrency = normalizeCurrency(currency) || "LKR";
   const todayStart = date;
   const tomorrow = addDays(date, 1);
   const monthStart = startOfMonth(date);
   const nextMonthStart = addMonths(monthStart, 1);
+  const previousMonthStart = addMonths(monthStart, -1);
+  const previousThrough = addDays(previousMonthStart, Math.min(date.getUTCDate(), daysBetween(previousMonthStart, monthStart)));
   const reportRange = reportingRange(dateFrom, dateTo, monthStart, nextMonthStart);
   const reportStart = reportRange.start;
   const reportEnd = reportRange.end;
@@ -49,11 +55,18 @@ function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, curren
   const periodReservations = reservations.filter((reservation) =>
     overlaps(reservation, reportStart, reportEnd)
   );
-  const revenueReservations = reservations.filter((reservation) =>
+  const eligibleRevenue = reservations.filter((reservation) =>
     OCCUPANCY_STATUSES.has(reservation.status) &&
-    reservation.currency === selectedCurrency &&
+    reservation.currency === selectedCurrency
+  );
+  const revenueReservations = eligibleRevenue.filter((reservation) =>
     inRange(reservation.check_in, monthStart, nextMonthStart)
   );
+  const revenueToDate = {
+    current: reservationRevenue(revenueReservations.filter((reservation) => inRange(reservation.check_in, monthStart, tomorrow))),
+    previous: reservationRevenue(eligibleRevenue.filter((reservation) => inRange(reservation.check_in, previousMonthStart, previousThrough))),
+    previous_month: isoDate(previousMonthStart).slice(0, 7)
+  };
 
   const trendStart = dateFrom && dateTo ? reportStart : addDays(date, -6);
   const trendEnd = dateFrom && dateTo ? addDays(reportEnd, -1) : date;
@@ -177,14 +190,15 @@ function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, curren
       arrival_guests: guestCount(arrivals),
       departures: departures.length,
       departure_rooms: roomCount(departures),
+      checked_out_departure_rooms: roomCount(departures.filter((reservation) => reservation.status === "checked_out")),
+      checkout_deadline: checkoutDeadline,
       occupied_rooms: occupiedRooms,
       total_rooms: activeRooms.length,
       sellable_rooms: sellableRooms.length,
       occupancy: percentage(occupiedRooms, sellableRooms.length),
-      revenue: round(revenueReservations.reduce(
-        (total, reservation) => total + number(reservation.financial_summary?.grand_total), 0
-      )),
-      revenue_label: "Current month reservation revenue"
+      revenue: reservationRevenue(revenueReservations),
+      revenue_label: "Current month reservation revenue",
+      revenue_to_date: revenueToDate
     },
     occupancy_trend: occupancyTrend,
     monthly_occupancy: monthlyOccupancy,
@@ -192,6 +206,7 @@ function buildDashboardSummary({ propertyId = "", asOf, dateFrom, dateTo, curren
     monthly_room_nights: monthlyRoomNights,
     countries,
     analytics: {
+      stay_metrics: getStayMetrics(reservations, monthStart, nextMonthStart),
       monthly_performance: monthlyPerformance,
       revenue_breakdown: Object.entries(financialTotals).map(([label, value]) => ({ label, value: round(value) })),
       guest_demographics: demographics
@@ -287,6 +302,37 @@ function guestCount(reservations) {
 
 function roomCount(reservations) {
   return reservations.reduce((total, reservation) => total + (reservation.rooms || []).length, 0);
+}
+
+function reservationRevenue(reservations) {
+  return round(reservations.reduce((total, reservation) => total + number(reservation.financial_summary?.grand_total), 0));
+}
+
+function getStayMetrics(reservations, start, end) {
+  let nights = 0;
+  let stays = 0;
+  let leadDays = 0;
+  let staysWithBookingDates = 0;
+
+  for (const reservation of reservations) {
+    if (reservation.is_day_room || !OCCUPANCY_STATUSES.has(reservation.status)) continue;
+    const checkIn = dateOnly(reservation.check_in, "check_in");
+    if (checkIn < start || checkIn >= end) continue;
+    const stayNights = daysBetween(checkIn, dateOnly(reservation.check_out, "check_out"));
+    if (stayNights === 0) continue;
+    nights += stayNights;
+    stays += 1;
+
+    const bookedOn = reservation.reservation_date ? isoDate(reservation.reservation_date) : "";
+    if (!bookedOn || bookedOn > isoDate(checkIn)) continue;
+    leadDays += daysBetween(new Date(bookedOn), checkIn);
+    staysWithBookingDates += 1;
+  }
+
+  return {
+    average_stay_nights: stays > 0 ? round(nights / stays) : null,
+    average_lead_days: staysWithBookingDates > 0 ? round(leadDays / staysWithBookingDates) : null
+  };
 }
 
 function inferCurrency(reservations, roomTypes) {
